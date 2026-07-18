@@ -2,27 +2,24 @@
 
 This example connects to the Binance Spot FIX market-data endpoint and subscribes to either the incremental order book or trade stream.
 
-Create a repository-root `.env` file containing only the credentials:
+Create a repository-root `config.yaml`:
 
 ```bash
-cp examples/market_data/.env.example .env
+cp examples/market_data/config.example.yaml config.yaml
 ```
 
-The credential settings are:
+The settings are:
 
-- `BINANCE_FIX_API_KEY`: Binance Ed25519 API key.
-- `BINANCE_FIX_PRIVATE_KEY_FILE`: absolute path to the Ed25519 private key PEM.
+- `stream`: `orderbook` or `trade`.
+- `symbols`: symbols to subscribe.
+- `depth`: `1` for book ticker, or `2..5000` for incremental depth. Ignored for trade.
+- `api_key`: Binance Ed25519 API key.
+- `api_secret`: path to the Ed25519 private key PEM.
 
-Order book (`MarketDepth=1` for book ticker, `2..5000` for incremental depth):
+Run the example:
 
 ```bash
-go run ./examples/market_data --stream orderbook --depth 10 --symbol BTCUSDT --symbol ETHUSDT
+go run ./examples/market_data
 ```
 
-Trade stream:
-
-```bash
-go run ./examples/market_data --stream trade --symbol BTCUSDT
-```
-
-`--symbol` may be specified multiple times. When omitted, it defaults to `BTCUSDT`. `--depth` defaults to `2` and is ignored for the trade stream. The example connects to the production endpoint `fix-md.binance.com:9000` and runs until interrupted.
+The example connects to the production endpoint `fix-md.binance.com:9000` and runs until interrupted.

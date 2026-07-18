@@ -1,0 +1,15 @@
+# https://goframe.org/docs/core/glog-config
+logger:
+  level: "info"
+  stdout: true
+
+stream: "orderbook"
+
+symbols:
+  - "BTCUSDT"
+  - "ETHUSDT"
+
+depth: 20
+
+api_key: "YOUR_API_KEY"
+api_secret: "/absolute/path/to/private_key.pem"

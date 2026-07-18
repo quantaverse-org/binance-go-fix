@@ -3,146 +3,168 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	fix "binance-go-fix"
 	"binance-go-fix/message"
 
-	"github.com/joho/godotenv"
+	"github.com/gogf/gf/v2/frame/g"
+	"github.com/gogf/gf/v2/os/gcmd"
+	"github.com/gogf/gf/v2/os/gctx"
 	nanoid "github.com/matoous/go-nanoid/v2"
 )
 
 const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 func main() {
-	if err := run(); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	ctx := gctx.GetInitCtx()
+	mainCmd.Run(ctx)
 }
 
-func run() error {
-	if err := godotenv.Load(); err != nil {
-		return fmt.Errorf("load .env: %w", err)
-	}
-
-	var symbols []string
-	flag.Func("symbol", "symbol to subscribe; may be specified multiple times", func(value string) error {
-		symbol := strings.ToUpper(strings.TrimSpace(value))
-		if symbol == "" {
-			return errors.New("symbol cannot be empty")
+var mainCmd = gcmd.Command{
+	Name:   "market-data",
+	Usage:  "market-data",
+	Brief:  "subscribe to Binance Spot FIX market data",
+	Strict: true,
+	Func: func(ctx context.Context, _ *gcmd.Parser) (err error) {
+		symbolsConfig, err := g.Cfg().Get(ctx, "symbols")
+		if err != nil {
+			return fmt.Errorf("load symbols: %w", err)
 		}
-		symbols = append(symbols, symbol)
-		return nil
-	})
-	streamFlag := flag.String("stream", "orderbook", "stream to test: orderbook or trade")
-	depthFlag := flag.String("depth", "2", "order book depth: 1 for book ticker, 2-5000 for depth stream")
-	flag.Parse()
-
-	if len(symbols) == 0 {
-		symbols = append(symbols, "BTCUSDT")
-	}
-	stream := strings.ToLower(strings.TrimSpace(*streamFlag))
-	if stream != "orderbook" && stream != "trade" {
-		return fmt.Errorf("unsupported stream %q: want orderbook or trade", *streamFlag)
-	}
-
-	apiKey, err := loadAPIKey()
-	if err != nil {
-		return err
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	config := fix.NewClientConfig(apiKey).WithEnableNotify()
-	client, updating, err := fix.NewMarketClient(ctx, config)
-	if err != nil {
-		return fmt.Errorf("connect market data client: %w", err)
-	}
-	if updating == nil {
-		return errors.New("market data updating channel is disabled")
-	}
-
-	requestID := nanoid.MustGenerate(alphabet, 16)
-	request := message.NewMarketDataRequest(requestID, message.SubscriptionRequestTypeSubscribe)
-	request.Symbols = symbols
-	if stream == "orderbook" {
-		aggregatedBook := true
-		request.MarketDepth = strings.TrimSpace(*depthFlag)
-		request.AggregatedBook = &aggregatedBook
-		request.MDEntryTypes = []message.MDEntryType{
-			message.MDEntryTypeBid,
-			message.MDEntryTypeOffer,
+		if symbolsConfig == nil {
+			return errors.New("symbols is required")
 		}
-	} else {
-		request.MDEntryTypes = []message.MDEntryType{message.MDEntryTypeTrade}
-	}
+		symbols := symbolsConfig.Strings()
+		if len(symbols) == 0 {
+			return errors.New("symbols cannot be empty")
+		}
+		for i, symbol := range symbols {
+			symbols[i] = strings.ToUpper(strings.TrimSpace(symbol))
+			if symbols[i] == "" {
+				return errors.New("symbol cannot be empty")
+			}
+		}
 
-	snapshots, err := client.MarketData(request)
-	if err != nil {
-		return fmt.Errorf("subscribe market data: %w", err)
-	}
-	fmt.Printf("subscribed request=%s stream=%s symbols=%s snapshots=%d\n",
-		requestID,
-		stream,
-		strings.Join(symbols, ","),
-		len(snapshots),
-	)
-	for _, snapshot := range snapshots {
-		fmt.Printf("snapshot request=%s symbol=%s entries=%s last_update_id=%s\n",
-			snapshot.MDReqID,
-			snapshot.Symbol,
-			snapshot.NoMDEntries,
-			snapshot.LastBookUpdateID,
+		streamConfig, err := g.Cfg().Get(ctx, "stream")
+		if err != nil {
+			return fmt.Errorf("load stream: %w", err)
+		}
+		if streamConfig == nil {
+			return errors.New("stream is required")
+		}
+		stream := strings.ToLower(strings.TrimSpace(streamConfig.String()))
+		if stream != "orderbook" && stream != "trade" {
+			return fmt.Errorf("unsupported stream %q: want orderbook or trade", stream)
+		}
+
+		apiKey, err := loadAPIKey(ctx)
+		if err != nil {
+			return err
+		}
+
+		config := fix.NewClientConfig(apiKey).WithEnableNotify()
+		client, updating, err := fix.NewMarketClient(ctx, config)
+		if err != nil {
+			return fmt.Errorf("connect market data client: %w", err)
+		}
+		if updating == nil {
+			return errors.New("market data updating channel is disabled")
+		}
+
+		requestID := nanoid.MustGenerate(alphabet, 16)
+		request := message.NewMarketDataRequest(requestID, message.SubscriptionRequestTypeSubscribe)
+		request.Symbols = symbols
+		if stream == "orderbook" {
+			depthConfig, err := g.Cfg().Get(ctx, "depth")
+			if err != nil {
+				return fmt.Errorf("load depth: %w", err)
+			}
+			if depthConfig == nil {
+				return errors.New("depth is required for orderbook stream")
+			}
+			aggregatedBook := true
+			request.MarketDepth = strings.TrimSpace(depthConfig.String())
+			request.AggregatedBook = &aggregatedBook
+			request.MDEntryTypes = []message.MDEntryType{
+				message.MDEntryTypeBid,
+				message.MDEntryTypeOffer,
+			}
+		} else {
+			request.MDEntryTypes = []message.MDEntryType{message.MDEntryTypeTrade}
+		}
+
+		snapshots, err := client.MarketData(request)
+		if err != nil {
+			return fmt.Errorf("subscribe market data: %w", err)
+		}
+		g.Log().Infof(ctx, "subscribed request=%s stream=%s symbols=%s snapshots=%d",
+			requestID,
+			stream,
+			strings.Join(symbols, ","),
+			len(snapshots),
 		)
-	}
-
-	defer func() {
-		unsubscribe := message.NewMarketDataRequest(requestID, message.SubscriptionRequestTypeUnsubscribe)
-		unsubscribe.MarketDepth = request.MarketDepth
-		if _, unsubscribeErr := client.MarketData(unsubscribe); unsubscribeErr != nil {
-			fmt.Fprintf(os.Stderr, "unsubscribe market data: %v\n", unsubscribeErr)
+		for _, snapshot := range snapshots {
+			g.Log().Infof(ctx, "snapshot request=%s symbol=%s entries=%s last_update_id=%s",
+				snapshot.MDReqID,
+				snapshot.Symbol,
+				snapshot.NoMDEntries,
+				snapshot.LastBookUpdateID,
+			)
 		}
-	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case update, ok := <-updating.MarketData:
-			if !ok {
-				return ctx.Err()
+		defer func() {
+			unsubscribe := message.NewMarketDataRequest(requestID, message.SubscriptionRequestTypeUnsubscribe)
+			unsubscribe.MarketDepth = request.MarketDepth
+			if _, unsubscribeErr := client.MarketData(unsubscribe); unsubscribeErr != nil {
+				g.Log().Errorf(ctx, "unsubscribe market data: %v", unsubscribeErr)
 			}
-			switch update := update.(type) {
-			case *message.MarketDataSnapshot:
-				fmt.Printf("snapshot request=%s symbol=%s entries=%s last_update_id=%s\n",
-					update.MDReqID,
-					update.Symbol,
-					update.NoMDEntries,
-					update.LastBookUpdateID,
-				)
-			case *message.MarketDataIncrementalRefresh:
-				fmt.Printf("incremental request=%s entries=%s\n", update.MDReqID, update.NoMDEntries)
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case update, ok := <-updating.MarketData:
+				if !ok {
+					return ctx.Err()
+				}
+				switch update := update.(type) {
+				case *message.MarketDataSnapshot:
+					g.Log().Infof(ctx, "snapshot request=%s symbol=%s entries=%s last_update_id=%s",
+						update.MDReqID,
+						update.Symbol,
+						update.NoMDEntries,
+						update.LastBookUpdateID,
+					)
+				case *message.MarketDataIncrementalRefresh:
+					g.Log().Infof(ctx, "incremental request=%s entries=%s", update.MDReqID, update.NoMDEntries)
+				}
 			}
 		}
-	}
+	},
 }
 
-func loadAPIKey() (*fix.ApiKey, error) {
-	username := strings.TrimSpace(os.Getenv("BINANCE_FIX_API_KEY"))
-	if username == "" {
-		return nil, errors.New("BINANCE_FIX_API_KEY is required")
+func loadAPIKey(ctx context.Context) (*fix.ApiKey, error) {
+	apiKeyConfig, err := g.Cfg().Get(ctx, "api_key")
+	if err != nil {
+		return nil, fmt.Errorf("load api_key: %w", err)
+	}
+	if apiKeyConfig == nil || strings.TrimSpace(apiKeyConfig.String()) == "" {
+		return nil, errors.New("api_key is required")
 	}
 
-	privateKeyFile := strings.TrimSpace(os.Getenv("BINANCE_FIX_PRIVATE_KEY_FILE"))
+	apiSecretConfig, err := g.Cfg().Get(ctx, "api_secret")
+	if err != nil {
+		return nil, fmt.Errorf("load api_secret: %w", err)
+	}
+	if apiSecretConfig == nil {
+		return nil, errors.New("api_secret is required")
+	}
+	privateKeyFile := strings.TrimSpace(apiSecretConfig.String())
 	if privateKeyFile == "" {
-		return nil, errors.New("BINANCE_FIX_PRIVATE_KEY_FILE is required")
+		return nil, errors.New("api_secret is required")
 	}
 	privateKeyPEM, err := os.ReadFile(privateKeyFile)
 	if err != nil {
@@ -154,7 +176,7 @@ func loadAPIKey() (*fix.ApiKey, error) {
 	}
 
 	return &fix.ApiKey{
-		UserName:   username,
+		UserName:   strings.TrimSpace(apiKeyConfig.String()),
 		PrivateKey: privateKey,
 	}, nil
 }
