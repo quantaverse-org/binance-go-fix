@@ -65,12 +65,12 @@ var mainCmd = gcmd.Command{
 		}
 
 		config := fix.NewClientConfig(apiKey).WithEnableNotify()
-		client, updating, err := fix.NewMarketClient(ctx, config)
+		client, subscription, err := fix.NewMarketClient(ctx, config)
 		if err != nil {
 			return fmt.Errorf("connect market data client: %w", err)
 		}
-		if updating == nil {
-			return errors.New("market data updating channel is disabled")
+		if subscription == nil {
+			return errors.New("market data subscription channel is disabled")
 		}
 
 		requestID := nanoid.MustGenerate(alphabet, 16)
@@ -84,9 +84,8 @@ var mainCmd = gcmd.Command{
 			if depthConfig == nil {
 				return errors.New("depth is required for orderbook stream")
 			}
-			aggregatedBook := true
 			request.MarketDepth = strings.TrimSpace(depthConfig.String())
-			request.AggregatedBook = &aggregatedBook
+			request.AggregatedBook = new(true)
 			request.MDEntryTypes = []message.MDEntryType{
 				message.MDEntryTypeBid,
 				message.MDEntryTypeOffer,
@@ -95,29 +94,19 @@ var mainCmd = gcmd.Command{
 			request.MDEntryTypes = []message.MDEntryType{message.MDEntryTypeTrade}
 		}
 
-		snapshots, err := client.MarketData(request)
-		if err != nil {
+		if err = client.MarketData(request); err != nil {
 			return fmt.Errorf("subscribe market data: %w", err)
 		}
-		g.Log().Infof(ctx, "subscribed request=%s stream=%s symbols=%s snapshots=%d",
+		g.Log().Infof(ctx, "subscribed request=%s stream=%s symbols=%s",
 			requestID,
 			stream,
 			strings.Join(symbols, ","),
-			len(snapshots),
 		)
-		for _, snapshot := range snapshots {
-			g.Log().Infof(ctx, "snapshot request=%s symbol=%s entries=%s last_update_id=%s",
-				snapshot.MDReqID,
-				snapshot.Symbol,
-				snapshot.NoMDEntries,
-				snapshot.LastBookUpdateID,
-			)
-		}
 
 		defer func() {
 			unsubscribe := message.NewMarketDataRequest(requestID, message.SubscriptionRequestTypeUnsubscribe)
 			unsubscribe.MarketDepth = request.MarketDepth
-			if _, unsubscribeErr := client.MarketData(unsubscribe); unsubscribeErr != nil {
+			if unsubscribeErr := client.MarketData(unsubscribe); unsubscribeErr != nil {
 				g.Log().Errorf(ctx, "unsubscribe market data: %v", unsubscribeErr)
 			}
 		}()
@@ -126,20 +115,20 @@ var mainCmd = gcmd.Command{
 			select {
 			case <-ctx.Done():
 				return nil
-			case update, ok := <-updating.MarketData:
+			case update, ok := <-subscription.MarketData:
 				if !ok {
 					return ctx.Err()
 				}
 				switch update := update.(type) {
 				case *message.MarketDataSnapshot:
-					g.Log().Infof(ctx, "snapshot request=%s symbol=%s entries=%s last_update_id=%s",
+					g.Log().Infof(ctx, "snapshot request=%s symbol=%s entries=%+v last_update_id=%s",
 						update.MDReqID,
 						update.Symbol,
-						update.NoMDEntries,
+						update.Entries,
 						update.LastBookUpdateID,
 					)
 				case *message.MarketDataIncrementalRefresh:
-					g.Log().Infof(ctx, "incremental request=%s entries=%s", update.MDReqID, update.NoMDEntries)
+					g.Log().Infof(ctx, "incremental request=%s entries=%+v", update.MDReqID, update.Entries)
 				}
 			}
 		}

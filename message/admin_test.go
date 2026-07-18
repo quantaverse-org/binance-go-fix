@@ -93,6 +93,9 @@ func TestRejectFromMessage(t *testing.T) {
 	if reject.Text != "Missing field" {
 		t.Fatalf("Text = %q, want %q", reject.Text, "Missing field")
 	}
+	if got, want := reject.Error(), "session reject, reason=1, errorCode=-1102, text=Missing field"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
 }
 
 func TestNewsFromMessage(t *testing.T) {

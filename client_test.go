@@ -15,7 +15,7 @@ func TestClientConfigWithMethods(t *testing.T) {
 
 	config := NewClientConfig(apiKey).
 		WithEnableNotify().
-		WithClientName("client-name").
+		WithClientName("TEST").
 		WithHeartbeatInterval(10 * time.Second).
 		WithReconnectInterval(2 * time.Second).
 		WithResponseTimeout(5 * time.Second).
@@ -25,8 +25,8 @@ func TestClientConfigWithMethods(t *testing.T) {
 	if !config.EnableNotify {
 		t.Fatal("EnableNotify = false, want true")
 	}
-	if config.ClientName != "client-name" {
-		t.Fatalf("ClientName = %q, want %q", config.ClientName, "client-name")
+	if config.ClientName != "TEST" {
+		t.Fatalf("ClientName = %q, want %q", config.ClientName, "TEST")
 	}
 	if config.HeartbeatInterval != 10*time.Second {
 		t.Fatalf("HeartbeatInterval = %v, want %v", config.HeartbeatInterval, 10*time.Second)
@@ -49,20 +49,21 @@ func TestClientConfigWithMethods(t *testing.T) {
 }
 
 func TestDispatchMessageSendsMarketDataIncrementalUpdate(t *testing.T) {
-	msg, err := message.ParseMessage(clientTestSOH("8=FIX.4.4|9=1|35=X|52=20241019-05:40:11.466313|262=md-1|268=1|10=000|"))
+	msg, err := message.ParseMessage(clientTestSOH("8=FIX.4.4|9=1|35=X|52=20241019-05:40:11.466313|262=md-1|268=1|279=0|270=1|269=2|10=000|"))
 	if err != nil {
 		t.Fatalf("ParseMessage() error = %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	senders, updating := initUpdating()
+	senders, subscription := initMarketSubscription(1)
 	client := &Client{
-		config: &ClientConfig{
-			ClientName: "test-client",
-		},
-		updating: senders,
+		config:       &ClientConfig{ClientName: "test-client"},
+		subscription: senders,
+		respChannels: make(map[string]*responseWaiter),
 	}
+	ch := make(chan responseResult, 1)
+	client.registerRespWaiter([]string{"md-1"}, ch)
 
 	dispatched := make(chan error, 1)
 	go func() {
@@ -74,7 +75,7 @@ func TestDispatchMessageSendsMarketDataIncrementalUpdate(t *testing.T) {
 	}()
 
 	select {
-	case update := <-updating.MarketData:
+	case update := <-subscription.MarketData:
 		resp, ok := update.(*message.MarketDataIncrementalRefresh)
 		if !ok {
 			t.Fatalf("market data update type = %T, want *message.MarketDataIncrementalRefresh", update)
@@ -82,8 +83,18 @@ func TestDispatchMessageSendsMarketDataIncrementalUpdate(t *testing.T) {
 		if resp.MDReqID != "md-1" {
 			t.Fatalf("MDReqID = %q, want %q", resp.MDReqID, "md-1")
 		}
+		if len(resp.Entries) != 1 || resp.Entries[0].MDEntryType != message.MDEntryTypeTrade {
+			t.Fatalf("Entries = %+v", resp.Entries)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for market data incremental update")
+	}
+	result := readClientResponseResult(t, ch)
+	if result.err != nil {
+		t.Fatalf("response error = %v", result.err)
+	}
+	if _, ok := result.response.(*message.MarketDataIncrementalRefresh); !ok {
+		t.Fatalf("response type = %T, want *message.MarketDataIncrementalRefresh", result.response)
 	}
 	if err := <-dispatched; err != nil {
 		t.Fatal(err)
@@ -98,10 +109,10 @@ func TestDispatchMessageSendsOrderExecutionUpdate(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	senders, updating := initUpdating()
+	senders, subscription := initOrderSubscription(1)
 	client := &Client{
-		config:   &ClientConfig{ClientName: "test-client"},
-		updating: senders,
+		config:       &ClientConfig{ClientName: "test-client"},
+		subscription: senders,
 	}
 
 	dispatched := make(chan error, 1)
@@ -114,7 +125,7 @@ func TestDispatchMessageSendsOrderExecutionUpdate(t *testing.T) {
 	}()
 
 	select {
-	case resp := <-updating.OrderExecution:
+	case resp := <-subscription.OrderExecution:
 		if resp.ClOrdID != "order-1" {
 			t.Fatalf("ClOrdID = %q, want %q", resp.ClOrdID, "order-1")
 		}
@@ -149,7 +160,7 @@ func TestDispatchMessageDeliversResponseChannel(t *testing.T) {
 		respChannels: make(map[string]*responseWaiter),
 	}
 	ch := make(chan responseResult, 1)
-	client.registerRespWaiter([]string{"order-1"}, ch, 1)
+	client.registerRespWaiter([]string{"order-1"}, ch)
 
 	reconnect, err := client.dispatchMessage(context.Background(), msg)
 	if err != nil {
@@ -172,20 +183,36 @@ func TestDispatchMessageDeliversResponseChannel(t *testing.T) {
 	}
 }
 
-func TestDispatchMessageDeliversMultipleResponseMessages(t *testing.T) {
+func TestDeliverResponseCompletesAllAliases(t *testing.T) {
+	client := &Client{respChannels: make(map[string]*responseWaiter)}
+	ch := make(chan responseResult, 1)
+	client.registerRespWaiter([]string{"new-order", "cancel-order"}, ch)
+
+	if delivered := client.deliverResponse("cancel-order", new(message.ExecutionReport)); !delivered {
+		t.Fatal("first response was not delivered")
+	}
+	if len(client.respChannels) != 0 {
+		t.Fatalf("len(respChannels) = %d, want 0", len(client.respChannels))
+	}
+	if delivered := client.deliverResponse("new-order", new(message.ExecutionReport)); delivered {
+		t.Fatal("second response was delivered to completed waiter")
+	}
+}
+
+func TestDispatchMessageMarketDataCompletesWaiterAndSendsEveryUpdate(t *testing.T) {
 	rawMessages := []string{
-		"8=FIX.4.4|9=1|35=W|52=20241019-05:41:52.867164|262=md-1|55=BTCUSDT|268=1|10=000|",
-		"8=FIX.4.4|9=1|35=W|52=20241019-05:41:52.867165|262=md-1|55=ETHUSDT|268=1|10=000|",
+		"8=FIX.4.4|9=1|35=W|52=20241019-05:41:52.867164|262=md-1|55=BTCUSDT|268=1|269=0|270=1|271=2|10=000|",
+		"8=FIX.4.4|9=1|35=W|52=20241019-05:41:52.867165|262=md-1|55=ETHUSDT|268=1|269=1|270=3|271=4|10=000|",
 	}
 
-	senders, updating := initUpdating()
+	senders, subscription := initMarketSubscription(2)
 	client := &Client{
 		config:       &ClientConfig{ClientName: "test-client"},
-		updating:     senders,
+		subscription: senders,
 		respChannels: make(map[string]*responseWaiter),
 	}
-	ch := make(chan responseResult, len(rawMessages))
-	client.registerRespWaiter([]string{"md-1"}, ch, len(rawMessages))
+	ch := make(chan responseResult, 1)
+	client.registerRespWaiter([]string{"md-1"}, ch)
 
 	for i, raw := range rawMessages {
 		msg, err := message.ParseMessage(clientTestSOH(raw))
@@ -195,45 +222,35 @@ func TestDispatchMessageDeliversMultipleResponseMessages(t *testing.T) {
 		if _, err = client.dispatchMessage(context.Background(), msg); err != nil {
 			t.Fatalf("dispatchMessage(%d) error = %v", i, err)
 		}
-		_, registered := client.respChannels["md-1"]
-		if registered != (i+1 < len(rawMessages)) {
-			t.Fatalf("response waiter registered after response %d = %v", i+1, registered)
-		}
+	}
+	if _, registered := client.respChannels["md-1"]; registered {
+		t.Fatal("response waiter was not removed after the first market data message")
 	}
 
-	wantSymbols := []string{"BTCUSDT", "ETHUSDT"}
-	for i, want := range wantSymbols {
-		result := readClientResponseResult(t, ch)
-		if result.err != nil {
-			t.Fatalf("response %d error = %v", i, result.err)
-		}
-		snapshot, ok := result.response.(*message.MarketDataSnapshot)
-		if !ok {
-			t.Fatalf("response %d type = %T, want *message.MarketDataSnapshot", i, result.response)
-		}
-		if snapshot.Symbol != want {
-			t.Fatalf("response %d Symbol = %q, want %q", i, snapshot.Symbol, want)
-		}
+	result := readClientResponseResult(t, ch)
+	if result.err != nil {
+		t.Fatalf("response error = %v", result.err)
+	}
+	snapshot, ok := result.response.(*message.MarketDataSnapshot)
+	if !ok {
+		t.Fatalf("response type = %T, want *message.MarketDataSnapshot", result.response)
+	}
+	if snapshot.Symbol != "BTCUSDT" {
+		t.Fatalf("response Symbol = %q, want %q", snapshot.Symbol, "BTCUSDT")
 	}
 
-	update, err := message.ParseMessage(clientTestSOH("8=FIX.4.4|9=1|35=W|52=20241019-05:41:52.867166|262=md-1|55=SOLUSDT|268=1|10=000|"))
-	if err != nil {
-		t.Fatalf("ParseMessage(update) error = %v", err)
-	}
-	if _, err = client.dispatchMessage(context.Background(), update); err != nil {
-		t.Fatalf("dispatchMessage(update) error = %v", err)
-	}
-	select {
-	case update := <-updating.MarketData:
+	for _, want := range []string{"BTCUSDT", "ETHUSDT"} {
+		update := <-subscription.MarketData
 		snapshot, ok := update.(*message.MarketDataSnapshot)
 		if !ok {
 			t.Fatalf("market data update type = %T, want *message.MarketDataSnapshot", update)
 		}
-		if snapshot.Symbol != "SOLUSDT" {
-			t.Fatalf("update Symbol = %q, want %q", snapshot.Symbol, "SOLUSDT")
+		if snapshot.Symbol != want {
+			t.Fatalf("update Symbol = %q, want %q", snapshot.Symbol, want)
 		}
-	default:
-		t.Fatal("response after waiter completion was not sent to updating channel")
+		if len(snapshot.Entries) != 1 {
+			t.Fatalf("update Entries = %+v", snapshot.Entries)
+		}
 	}
 }
 
@@ -281,8 +298,8 @@ func TestDispatchMessageMarketDataRejectRemovesResubRequest(t *testing.T) {
 			"md-1": message.NewMarketDataRequest("md-1", message.SubscriptionRequestTypeSubscribe),
 		},
 	}
-	ch := make(chan responseResult, 2)
-	client.registerRespWaiter([]string{"md-1"}, ch, 2)
+	ch := make(chan responseResult, 1)
+	client.registerRespWaiter([]string{"md-1"}, ch)
 
 	reconnect, err := client.dispatchMessage(context.Background(), msg)
 	if err != nil {

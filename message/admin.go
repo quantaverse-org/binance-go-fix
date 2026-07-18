@@ -172,9 +172,6 @@ func (r *Reject) Error() string {
 	}
 	return rejectErrorMessage(
 		"session reject",
-		uint32PtrErrorPart("refSeqNum", r.RefSeqNum),
-		tagPtrErrorPart("refTagID", r.RefTagID),
-		errorPart("refMsgType", r.RefMsgType),
 		sessionRejectReasonPtrErrorPart("reason", r.SessionRejectReason),
 		int64PtrErrorPart("errorCode", r.ErrorCode),
 		errorPart("text", r.Text),
@@ -409,25 +406,11 @@ func errorPart(name string, value string) string {
 	return name + "=" + value
 }
 
-func uint32PtrErrorPart(name string, value *uint32) string {
-	if value == nil {
-		return ""
-	}
-	return name + "=" + FormatUint(uint64(*value))
-}
-
 func int64PtrErrorPart(name string, value *int64) string {
 	if value == nil {
 		return ""
 	}
 	return name + "=" + FormatInt(*value)
-}
-
-func tagPtrErrorPart(name string, value *Tag) string {
-	if value == nil {
-		return ""
-	}
-	return name + "=" + FormatTag(*value)
 }
 
 func sessionRejectReasonPtrErrorPart(name string, value *SessionRejectReason) string {

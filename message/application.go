@@ -1,6 +1,7 @@
 package message
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -388,6 +389,13 @@ const (
 	MDUpdateActionDelete MDUpdateAction = "2"
 )
 
+type AggressorSide string
+
+const (
+	AggressorSideBuy  AggressorSide = "1"
+	AggressorSideSell AggressorSide = "2"
+)
+
 type OrderFields struct {
 	ClOrdID                  string
 	OrderQty                 string
@@ -437,6 +445,12 @@ func (r *NewOrderSingle) ToMessage(senderCompID string, targetCompID string, seq
 	return builder.Build()
 }
 
+type MiscFee struct {
+	MiscFeeAmt  string
+	MiscFeeCurr string
+	MiscFeeType MiscFeeType
+}
+
 type ExecutionReport struct {
 	ExecID                   string
 	ClOrdID                  string
@@ -484,6 +498,7 @@ type ExecutionReport struct {
 	ErrorCode                string
 	Text                     string
 	NoMiscFees               string
+	MiscFees                 []MiscFee
 	TriggerType              TriggerType
 	TriggerAction            TriggerAction
 	TriggerPrice             string
@@ -535,6 +550,10 @@ func (r *ExecutionReport) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
+	noMiscFees, miscFees, err := parseMiscFees(m)
+	if err != nil {
+		return err
+	}
 
 	r.ExecID = optionalString(m, TagExecID)
 	r.ClOrdID = optionalString(m, TagClOrdID)
@@ -581,7 +600,8 @@ func (r *ExecutionReport) FromMessage(m *Message) error {
 	r.SOR = optionalString(m, TagSOR)
 	r.ErrorCode = optionalString(m, TagErrorCode)
 	r.Text = optionalString(m, TagText)
-	r.NoMiscFees = optionalString(m, TagNoMiscFees)
+	r.NoMiscFees = noMiscFees
+	r.MiscFees = miscFees
 	r.TriggerType = TriggerType(optionalString(m, TagTriggerType))
 	r.TriggerAction = TriggerAction(optionalString(m, TagTriggerAction))
 	r.TriggerPrice = optionalString(m, TagTriggerPrice)
@@ -603,15 +623,57 @@ func (r *ExecutionReport) Error() string {
 	}
 	return rejectErrorMessage(
 		"order rejected",
-		errorPart("clOrdID", r.ClOrdID),
-		errorPart("origClOrdID", r.OrigClOrdID),
-		errorPart("orderID", r.OrderID),
-		errorPart("symbol", r.Symbol),
-		errorPart("execType", string(r.ExecType)),
-		errorPart("ordStatus", string(r.OrdStatus)),
 		errorPart("errorCode", r.ErrorCode),
 		errorPart("text", r.Text),
 	)
+}
+
+func parseMiscFees(m *Message) (string, []MiscFee, error) {
+	countValue, fields, ok := repeatingGroupFields(m, TagNoMiscFees)
+	if !ok {
+		return "", nil, nil
+	}
+	count, err := ParseUint(countValue)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse field %d: %w", TagNoMiscFees, err)
+	}
+
+	fees := make([]MiscFee, 0)
+	for _, field := range fields {
+		if field.tag == TagCheckSum {
+			break
+		}
+		if field.tag == TagMiscFeeAmt {
+			fees = append(fees, MiscFee{MiscFeeAmt: field.value})
+			continue
+		}
+		if len(fees) == 0 {
+			continue
+		}
+		fee := &fees[len(fees)-1]
+		switch field.tag {
+		case TagMiscFeeCurr:
+			fee.MiscFeeCurr = field.value
+		case TagMiscFeeType:
+			fee.MiscFeeType = MiscFeeType(field.value)
+		}
+	}
+
+	if uint64(len(fees)) != count {
+		return "", nil, repeatingGroupCountError(TagNoMiscFees, len(fees), count)
+	}
+	for i, fee := range fees {
+		if fee.MiscFeeAmt == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoMiscFees, i, TagMiscFeeAmt)
+		}
+		if fee.MiscFeeCurr == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoMiscFees, i, TagMiscFeeCurr)
+		}
+		if fee.MiscFeeType == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoMiscFees, i, TagMiscFeeType)
+		}
+	}
+	return countValue, fees, nil
 }
 
 type OrderCancelRequest struct {
@@ -703,11 +765,6 @@ func (r *OrderCancelReject) Error() string {
 	}
 	return rejectErrorMessage(
 		"order cancel reject",
-		errorPart("clOrdID", r.ClOrdID),
-		errorPart("origClOrdID", r.OrigClOrdID),
-		errorPart("orderID", r.OrderID),
-		errorPart("symbol", r.Symbol),
-		errorPart("responseTo", string(r.CxlRejResponseTo)),
 		errorPart("errorCode", r.ErrorCode),
 		errorPart("text", r.Text),
 	)
@@ -825,10 +882,6 @@ func (r *OrderMassCancelReport) Error() string {
 	}
 	return rejectErrorMessage(
 		"order mass cancel reject",
-		errorPart("clOrdID", r.ClOrdID),
-		errorPart("symbol", r.Symbol),
-		errorPart("response", string(r.MassCancelResponse)),
-		errorPart("reason", string(r.MassCancelRejectReason)),
 		errorPart("errorCode", r.ErrorCode),
 		errorPart("text", r.Text),
 	)
@@ -893,6 +946,15 @@ type ListStatus struct {
 	ErrorCode        string
 	Text             string
 	NoOrders         string
+	Orders           []ListStatusOrder
+}
+
+type ListStatusOrder struct {
+	Symbol                       string
+	OrderID                      string
+	ClOrdID                      string
+	NoListTriggeringInstructions string
+	ListTriggeringInstructions   []ListTriggeringInstruction
 }
 
 func NewListStatus() *ListStatus {
@@ -912,8 +974,12 @@ func (r *ListStatus) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
+	noOrders, orders, err := parseListStatusOrders(m)
+	if err != nil {
+		return err
+	}
 
-	r.Symbol = optionalString(m, TagSymbol)
+	r.Symbol = optionalStringBeforeTag(m, TagSymbol, TagNoOrders)
 	r.ListID = optionalString(m, TagListID)
 	r.ClListID = optionalString(m, TagClListID)
 	r.OrigClListID = optionalString(m, TagOrigClListID)
@@ -925,7 +991,8 @@ func (r *ListStatus) FromMessage(m *Message) error {
 	r.TransactTime = optionalString(m, TagTransactTime)
 	r.ErrorCode = optionalString(m, TagErrorCode)
 	r.Text = optionalString(m, TagText)
-	r.NoOrders = optionalString(m, TagNoOrders)
+	r.NoOrders = noOrders
+	r.Orders = orders
 	return nil
 }
 
@@ -935,15 +1002,94 @@ func (r *ListStatus) Error() string {
 	}
 	return rejectErrorMessage(
 		"order list reject",
-		errorPart("clListID", r.ClListID),
-		errorPart("origClListID", r.OrigClListID),
-		errorPart("listID", r.ListID),
-		errorPart("symbol", r.Symbol),
-		errorPart("status", string(r.ListOrderStatus)),
-		errorPart("reason", string(r.ListRejectReason)),
 		errorPart("errorCode", r.ErrorCode),
 		errorPart("text", r.Text),
 	)
+}
+
+func parseListStatusOrders(m *Message) (string, []ListStatusOrder, error) {
+	countValue, fields, ok := repeatingGroupFields(m, TagNoOrders)
+	if !ok {
+		return "", nil, nil
+	}
+	count, err := ParseUint(countValue)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse field %d: %w", TagNoOrders, err)
+	}
+
+	orders := make([]ListStatusOrder, 0)
+	for _, field := range fields {
+		if field.tag == TagCheckSum {
+			break
+		}
+		if field.tag == TagSymbol {
+			orders = append(orders, ListStatusOrder{Symbol: field.value})
+			continue
+		}
+		if len(orders) == 0 {
+			continue
+		}
+
+		order := &orders[len(orders)-1]
+		switch field.tag {
+		case TagOrderID:
+			order.OrderID = field.value
+		case TagClOrdID:
+			order.ClOrdID = field.value
+		case TagNoListTriggeringInstructions:
+			order.NoListTriggeringInstructions = field.value
+		case TagListTriggerType:
+			order.ListTriggeringInstructions = append(order.ListTriggeringInstructions, ListTriggeringInstruction{
+				ListTriggerType: ListTriggerType(field.value),
+			})
+		case TagListTriggerTriggerIndex:
+			if len(order.ListTriggeringInstructions) > 0 {
+				order.ListTriggeringInstructions[len(order.ListTriggeringInstructions)-1].ListTriggerTriggerIndex = field.value
+			}
+		case TagListTriggerAction:
+			if len(order.ListTriggeringInstructions) > 0 {
+				order.ListTriggeringInstructions[len(order.ListTriggeringInstructions)-1].ListTriggerAction = ListTriggerAction(field.value)
+			}
+		}
+	}
+
+	if uint64(len(orders)) != count {
+		return "", nil, repeatingGroupCountError(TagNoOrders, len(orders), count)
+	}
+	for i, order := range orders {
+		if order.Symbol == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoOrders, i, TagSymbol)
+		}
+		if order.OrderID == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoOrders, i, TagOrderID)
+		}
+		if order.ClOrdID == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoOrders, i, TagClOrdID)
+		}
+		if err := validateListTriggeringInstructions(i, order); err != nil {
+			return "", nil, err
+		}
+	}
+	return countValue, orders, nil
+}
+
+func validateListTriggeringInstructions(orderIndex int, order ListStatusOrder) error {
+	if order.NoListTriggeringInstructions == "" {
+		if len(order.ListTriggeringInstructions) != 0 {
+			return repeatingGroupRequiredFieldError(TagNoOrders, orderIndex, TagNoListTriggeringInstructions)
+		}
+		return nil
+	}
+
+	count, err := ParseUint(order.NoListTriggeringInstructions)
+	if err != nil {
+		return fmt.Errorf("parse field %d in repeating group %d entry %d: %w", TagNoListTriggeringInstructions, TagNoOrders, orderIndex, err)
+	}
+	if uint64(len(order.ListTriggeringInstructions)) != count {
+		return fmt.Errorf("repeating group %d entry %d nested group %d count mismatch: got %d entries, want %d",
+			TagNoOrders, orderIndex, TagNoListTriggeringInstructions, len(order.ListTriggeringInstructions), count)
+	}
+	return nil
 }
 
 type OrderAmendKeepPriorityRequest struct {
@@ -1025,11 +1171,6 @@ func (r *OrderAmendReject) Error() string {
 	}
 	return rejectErrorMessage(
 		"order amend reject",
-		errorPart("clOrdID", r.ClOrdID),
-		errorPart("origClOrdID", r.OrigClOrdID),
-		errorPart("orderID", r.OrderID),
-		errorPart("symbol", r.Symbol),
-		errorPart("orderQty", r.OrderQty),
 		errorPart("errorCode", r.ErrorCode),
 		errorPart("text", r.Text),
 	)
@@ -1050,9 +1191,18 @@ func (r *LimitQuery) ToMessage(senderCompID string, targetCompID string, seqNum 
 		Build()
 }
 
+type LimitIndicator struct {
+	LimitType                    LimitType
+	LimitCount                   string
+	LimitMax                     string
+	LimitResetInterval           string
+	LimitResetIntervalResolution LimitResetIntervalResolution
+}
+
 type LimitResponse struct {
 	ReqID             string
 	NoLimitIndicators string
+	LimitIndicators   []LimitIndicator
 }
 
 func NewLimitResponse() *LimitResponse {
@@ -1068,14 +1218,67 @@ func (r *LimitResponse) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
-	noLimitIndicators, err := requiredString(m, TagNoLimitIndicators)
+	noLimitIndicators, limitIndicators, err := parseLimitIndicators(m)
 	if err != nil {
 		return err
 	}
 
 	r.ReqID = reqID
 	r.NoLimitIndicators = noLimitIndicators
+	r.LimitIndicators = limitIndicators
 	return nil
+}
+
+func parseLimitIndicators(m *Message) (string, []LimitIndicator, error) {
+	countValue, fields, err := requiredRepeatingGroupFields(m, TagNoLimitIndicators)
+	if err != nil {
+		return "", nil, err
+	}
+	count, err := ParseUint(countValue)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse field %d: %w", TagNoLimitIndicators, err)
+	}
+
+	indicators := make([]LimitIndicator, 0)
+	for _, field := range fields {
+		if field.tag == TagCheckSum {
+			break
+		}
+		if field.tag == TagLimitType {
+			indicators = append(indicators, LimitIndicator{LimitType: LimitType(field.value)})
+			continue
+		}
+		if len(indicators) == 0 {
+			continue
+		}
+		indicator := &indicators[len(indicators)-1]
+		switch field.tag {
+		case TagLimitCount:
+			indicator.LimitCount = field.value
+		case TagLimitMax:
+			indicator.LimitMax = field.value
+		case TagLimitResetInterval:
+			indicator.LimitResetInterval = field.value
+		case TagLimitResetIntervalResolution:
+			indicator.LimitResetIntervalResolution = LimitResetIntervalResolution(field.value)
+		}
+	}
+
+	if uint64(len(indicators)) != count {
+		return "", nil, repeatingGroupCountError(TagNoLimitIndicators, len(indicators), count)
+	}
+	for i, indicator := range indicators {
+		if indicator.LimitType == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoLimitIndicators, i, TagLimitType)
+		}
+		if indicator.LimitCount == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoLimitIndicators, i, TagLimitCount)
+		}
+		if indicator.LimitMax == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoLimitIndicators, i, TagLimitMax)
+		}
+	}
+	return countValue, indicators, nil
 }
 
 type InstrumentListRequest struct {
@@ -1100,9 +1303,24 @@ func (r *InstrumentListRequest) ToMessage(senderCompID string, targetCompID stri
 	return builder.Build()
 }
 
+type Instrument struct {
+	Symbol                string
+	Currency              string
+	MinTradeVol           string
+	MaxTradeVol           string
+	MinQtyIncrement       string
+	MarketMinTradeVol     string
+	MarketMaxTradeVol     string
+	MarketMinQtyIncrement string
+	MinPriceIncrement     string
+	StartPriceRange       string
+	EndPriceRange         string
+}
+
 type InstrumentList struct {
 	InstrumentReqID string
 	NoRelatedSym    string
+	Instruments     []Instrument
 }
 
 func NewInstrumentList() *InstrumentList {
@@ -1118,14 +1336,76 @@ func (r *InstrumentList) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
-	noRelatedSym, err := requiredString(m, TagNoRelatedSym)
+	noRelatedSym, instruments, err := parseInstruments(m)
 	if err != nil {
 		return err
 	}
 
 	r.InstrumentReqID = instrumentReqID
 	r.NoRelatedSym = noRelatedSym
+	r.Instruments = instruments
 	return nil
+}
+
+func parseInstruments(m *Message) (string, []Instrument, error) {
+	countValue, fields, err := requiredRepeatingGroupFields(m, TagNoRelatedSym)
+	if err != nil {
+		return "", nil, err
+	}
+	count, err := ParseUint(countValue)
+	if err != nil {
+		return "", nil, fmt.Errorf("parse field %d: %w", TagNoRelatedSym, err)
+	}
+
+	instruments := make([]Instrument, 0)
+	for _, field := range fields {
+		if field.tag == TagCheckSum {
+			break
+		}
+		if field.tag == TagSymbol {
+			instruments = append(instruments, Instrument{Symbol: field.value})
+			continue
+		}
+		if len(instruments) == 0 {
+			continue
+		}
+		instrument := &instruments[len(instruments)-1]
+		switch field.tag {
+		case TagCurrency:
+			instrument.Currency = field.value
+		case TagMinTradeVol:
+			instrument.MinTradeVol = field.value
+		case TagMaxTradeVol:
+			instrument.MaxTradeVol = field.value
+		case TagMinQtyIncrement:
+			instrument.MinQtyIncrement = field.value
+		case TagMarketMinTradeVol:
+			instrument.MarketMinTradeVol = field.value
+		case TagMarketMaxTradeVol:
+			instrument.MarketMaxTradeVol = field.value
+		case TagMarketMinQtyIncrement:
+			instrument.MarketMinQtyIncrement = field.value
+		case TagMinPriceIncrement:
+			instrument.MinPriceIncrement = field.value
+		case TagStartPriceRange:
+			instrument.StartPriceRange = field.value
+		case TagEndPriceRange:
+			instrument.EndPriceRange = field.value
+		}
+	}
+
+	if uint64(len(instruments)) != count {
+		return "", nil, repeatingGroupCountError(TagNoRelatedSym, len(instruments), count)
+	}
+	for i, instrument := range instruments {
+		if instrument.Symbol == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoRelatedSym, i, TagSymbol)
+		}
+		if instrument.Currency == "" {
+			return "", nil, repeatingGroupRequiredFieldError(TagNoRelatedSym, i, TagCurrency)
+		}
+	}
+	return countValue, instruments, nil
 }
 
 type MarketDataRequest struct {
@@ -1200,8 +1480,6 @@ func (r *MarketDataRequestReject) Error() string {
 	}
 	return rejectErrorMessage(
 		"market data request reject",
-		errorPart("mdReqID", r.MDReqID),
-		errorPart("reason", string(r.MDReqRejReason)),
 		errorPart("errorCode", r.ErrorCode),
 		errorPart("text", r.Text),
 	)
@@ -1212,6 +1490,13 @@ type MarketDataSnapshot struct {
 	Symbol           string
 	LastBookUpdateID string
 	NoMDEntries      string
+	Entries          []MarketDataSnapshotEntry
+}
+
+type MarketDataSnapshotEntry struct {
+	MDEntryType MDEntryType
+	MDEntryPx   string
+	MDEntrySize string
 }
 
 func NewMarketDataSnapshot() *MarketDataSnapshot {
@@ -1231,7 +1516,7 @@ func (r *MarketDataSnapshot) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
-	noMDEntries, err := requiredString(m, TagNoMDEntries)
+	noMDEntries, entries, err := parseMarketDataSnapshotEntries(m)
 	if err != nil {
 		return err
 	}
@@ -1240,12 +1525,27 @@ func (r *MarketDataSnapshot) FromMessage(m *Message) error {
 	r.Symbol = symbol
 	r.LastBookUpdateID = optionalString(m, TagLastBookUpdateID)
 	r.NoMDEntries = noMDEntries
+	r.Entries = entries
 	return nil
 }
 
 type MarketDataIncrementalRefresh struct {
 	MDReqID     string
 	NoMDEntries string
+	Entries     []MarketDataIncrementalRefreshEntry
+}
+
+type MarketDataIncrementalRefreshEntry struct {
+	MDUpdateAction    MDUpdateAction
+	MDEntryPx         string
+	MDEntrySize       string
+	MDEntryType       MDEntryType
+	Symbol            string
+	TransactTime      string
+	TradeID           string
+	AggressorSide     AggressorSide
+	FirstBookUpdateID string
+	LastBookUpdateID  string
 }
 
 func NewMarketDataIncrementalRefresh() *MarketDataIncrementalRefresh {
@@ -1261,14 +1561,179 @@ func (r *MarketDataIncrementalRefresh) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
-	noMDEntries, err := requiredString(m, TagNoMDEntries)
+	noMDEntries, entries, err := parseMarketDataIncrementalRefreshEntries(m)
 	if err != nil {
 		return err
 	}
 
 	r.MDReqID = mdReqID
 	r.NoMDEntries = noMDEntries
+	r.Entries = entries
 	return nil
+}
+
+func parseMarketDataSnapshotEntries(m *Message) (string, []MarketDataSnapshotEntry, error) {
+	countValue, fields, err := marketDataGroupFields(m)
+	if err != nil {
+		return "", nil, err
+	}
+	count, err := ParseUint(countValue)
+	if err != nil {
+		return "", nil, err
+	}
+
+	entries := make([]MarketDataSnapshotEntry, 0)
+	for _, field := range fields {
+		if field.tag == TagCheckSum {
+			break
+		}
+		if field.tag == TagMDEntryType {
+			entries = append(entries, MarketDataSnapshotEntry{MDEntryType: MDEntryType(field.value)})
+			continue
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		entry := &entries[len(entries)-1]
+		switch field.tag {
+		case TagMDEntryPx:
+			entry.MDEntryPx = field.value
+		case TagMDEntrySize:
+			entry.MDEntrySize = field.value
+		}
+	}
+
+	if uint64(len(entries)) != count {
+		return "", nil, fmt.Errorf("NoMDEntries count mismatch: got %d entries, want %d", len(entries), count)
+	}
+	for i, entry := range entries {
+		if entry.MDEntryType == "" {
+			return "", nil, fmt.Errorf("market data snapshot entry %d missing MDEntryType", i)
+		}
+		if entry.MDEntryPx == "" {
+			return "", nil, fmt.Errorf("market data snapshot entry %d missing MDEntryPx", i)
+		}
+		if entry.MDEntrySize == "" {
+			return "", nil, fmt.Errorf("market data snapshot entry %d missing MDEntrySize", i)
+		}
+	}
+	return countValue, entries, nil
+}
+
+func parseMarketDataIncrementalRefreshEntries(m *Message) (string, []MarketDataIncrementalRefreshEntry, error) {
+	countValue, fields, err := marketDataGroupFields(m)
+	if err != nil {
+		return "", nil, err
+	}
+	count, err := ParseUint(countValue)
+	if err != nil {
+		return "", nil, err
+	}
+
+	entries := make([]MarketDataIncrementalRefreshEntry, 0)
+	for _, field := range fields {
+		if field.tag == TagCheckSum {
+			break
+		}
+		if field.tag == TagMDUpdateAction {
+			entries = append(entries, MarketDataIncrementalRefreshEntry{MDUpdateAction: MDUpdateAction(field.value)})
+			continue
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		entry := &entries[len(entries)-1]
+		switch field.tag {
+		case TagMDEntryPx:
+			entry.MDEntryPx = field.value
+		case TagMDEntrySize:
+			entry.MDEntrySize = field.value
+		case TagMDEntryType:
+			entry.MDEntryType = MDEntryType(field.value)
+		case TagSymbol:
+			entry.Symbol = field.value
+		case TagTransactTime:
+			entry.TransactTime = field.value
+		case TagTradeID:
+			entry.TradeID = field.value
+		case TagAggressorSide:
+			entry.AggressorSide = AggressorSide(field.value)
+		case TagFirstBookUpdateID:
+			entry.FirstBookUpdateID = field.value
+		case TagLastBookUpdateID:
+			entry.LastBookUpdateID = field.value
+		}
+	}
+
+	if uint64(len(entries)) != count {
+		return "", nil, fmt.Errorf("NoMDEntries count mismatch: got %d entries, want %d", len(entries), count)
+	}
+	for i := range entries {
+		entry := &entries[i]
+		if entry.MDUpdateAction == "" {
+			return "", nil, fmt.Errorf("market data incremental entry %d missing MDUpdateAction", i)
+		}
+		if entry.MDEntryPx == "" {
+			return "", nil, fmt.Errorf("market data incremental entry %d missing MDEntryPx", i)
+		}
+		if entry.MDEntryType == "" {
+			return "", nil, fmt.Errorf("market data incremental entry %d missing MDEntryType", i)
+		}
+		if i > 0 {
+			previous := entries[i-1]
+			if entry.Symbol == "" {
+				entry.Symbol = previous.Symbol
+			}
+			if entry.FirstBookUpdateID == "" {
+				entry.FirstBookUpdateID = previous.FirstBookUpdateID
+			}
+			if entry.LastBookUpdateID == "" {
+				entry.LastBookUpdateID = previous.LastBookUpdateID
+			}
+		}
+	}
+	return countValue, entries, nil
+}
+
+func marketDataGroupFields(m *Message) (string, []Field, error) {
+	return requiredRepeatingGroupFields(m, TagNoMDEntries)
+}
+
+func repeatingGroupFields(m *Message, countTag Tag) (string, []Field, bool) {
+	for i, field := range m.fields {
+		if field.tag == countTag {
+			return field.value, m.fields[i+1:], true
+		}
+	}
+	return "", nil, false
+}
+
+func requiredRepeatingGroupFields(m *Message, countTag Tag) (string, []Field, error) {
+	countValue, fields, ok := repeatingGroupFields(m, countTag)
+	if !ok {
+		return "", nil, fmt.Errorf("missing field: %d", countTag)
+	}
+	return countValue, fields, nil
+}
+
+func repeatingGroupCountError(groupTag Tag, got int, want uint64) error {
+	return fmt.Errorf("repeating group %d count mismatch: got %d entries, want %d", groupTag, got, want)
+}
+
+func repeatingGroupRequiredFieldError(groupTag Tag, index int, fieldTag Tag) error {
+	return fmt.Errorf("repeating group %d entry %d missing field: %d", groupTag, index, fieldTag)
+}
+
+func optionalStringBeforeTag(m *Message, tag Tag, boundary Tag) string {
+	for _, field := range m.fields {
+		if field.tag == boundary {
+			break
+		}
+		if field.tag == tag {
+			return field.value
+		}
+	}
+	return ""
 }
 
 func newApplicationBuilder(msgType MsgType, senderCompID string, targetCompID string, seqNum uint32) *MsgBuilder {

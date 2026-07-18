@@ -22,14 +22,14 @@ const (
 	targetCompId = "SPOT"
 	orderHost    = "fix-oe.binance.com"
 	marketHost   = "fix-md.binance.com"
-	// updating channel 需要吸收同步请求等待期间穿插到达的主动推送，避免阻塞 FIX 读循环。
-	updatingChannelCapacity = 1024
+	// subscription channel 需要吸收同步请求等待期间穿插到达的主动推送，避免阻塞 FIX 读循环。
+	subscriptionChannelCapacity = 1024
 )
 
 var (
-	ErrConnectionBroken = errors.New("connection is broken, please try again later")
-	ErrResponseTimeout  = errors.New("response timeout")
-	LogonFailed         = errors.New("logon failed")
+	ErrReconnecting    = errors.New("reconnecting, retry later")
+	ErrResponseTimeout = errors.New("response timeout")
+	LogonFailed        = errors.New("logon failed")
 )
 
 // responseResult 将正常响应和 Reject 统一送入同一个请求等待通道。
@@ -38,49 +38,52 @@ type responseResult struct {
 	err      error
 }
 
-// responseWaiter 表示一个正在等待响应的请求。
-// 同一个请求可能通过多个业务 ID 关联响应，也可能需要收集多条响应消息。
+// responseWaiter 表示一个正在等待单条同步响应的请求。
+// 同一个请求可能通过多个业务 ID 关联响应。
 type responseWaiter struct {
-	ch        chan responseResult // 接收正常响应或 Reject。
-	ids       []string            // 注册到 respChannels 的全部业务 ID，用于统一清理别名。
-	remaining int                 // 尚未收到的正常响应数量；归零后不再拦截后续主动推送。
+	ch  chan responseResult // 接收正常响应或 Reject。
+	ids []string            // 注册到 respChannels 的全部业务 ID，用于统一清理别名。
 }
 
-// Updating 暴露服务器主动推送消息的只读通道。
-// 请求对应的同步响应会优先进入 responseWaiter，未匹配的消息才会进入这些通道。
-type Updating struct {
+// MarketSubscription 暴露市场数据服务器的推送消息。
+type MarketSubscription struct {
 	// MarketData 中只会出现 *MarketDataSnapshot 和 *MarketDataIncrementalRefresh。
-	MarketData      <-chan message.Response
+	MarketData <-chan message.Response
+}
+
+// OrderSubscription 暴露订单服务器的账户级推送消息。
+type OrderSubscription struct {
 	OrderExecution  <-chan *message.ExecutionReport
 	OrderListStatus <-chan *message.ListStatus
 }
 
-// updatingSenders 只由 Client 的消息分发协程持有，防止调用方误写更新通道。
-type updatingSenders struct {
+// subscriptionSenders 只由 Client 的消息分发协程持有，防止调用方误写更新通道。
+type subscriptionSenders struct {
 	marketData      chan<- message.Response
 	orderExecution  chan<- *message.ExecutionReport
 	orderListStatus chan<- *message.ListStatus
 }
 
-// initUpdating 创建内部发送端和对外只读端，共享同一组带缓冲 channel。
-func initUpdating() (*updatingSenders, *Updating) {
-	marketData := make(chan message.Response, updatingChannelCapacity)
-	orderExecution := make(chan *message.ExecutionReport, updatingChannelCapacity)
-	orderListStatus := make(chan *message.ListStatus, updatingChannelCapacity)
+func initMarketSubscription(cap int) (*subscriptionSenders, *MarketSubscription) {
+	marketData := make(chan message.Response, cap)
+	return &subscriptionSenders{marketData: marketData}, &MarketSubscription{MarketData: marketData}
+}
 
-	return &updatingSenders{
-			marketData:      marketData,
+func initOrderSubscription(cap int) (*subscriptionSenders, *OrderSubscription) {
+	orderExecution := make(chan *message.ExecutionReport, cap)
+	orderListStatus := make(chan *message.ListStatus, cap)
+
+	return &subscriptionSenders{
 			orderExecution:  orderExecution,
 			orderListStatus: orderListStatus,
-		}, &Updating{
-			MarketData:      marketData,
+		}, &OrderSubscription{
 			OrderExecution:  orderExecution,
 			OrderListStatus: orderListStatus,
 		}
 }
 
-// sendUpdating 在客户端关闭时放弃发送，否则允许缓冲区提供有限背压。
-func sendUpdating[T any](ctx context.Context, ch chan<- T, value T) {
+// sendSubscription 在客户端关闭时放弃发送，否则允许缓冲区提供有限背压。
+func sendSubscription[T any](ctx context.Context, ch chan<- T, value T) {
 	select {
 	case <-ctx.Done():
 	case ch <- value:
@@ -95,6 +98,7 @@ type ApiKey struct {
 type ClientConfig struct {
 	EnableNotify      bool
 	ClientName        string
+	ChannelCapacity   int
 	HeartbeatInterval time.Duration
 	ReconnectInterval time.Duration
 	ResponseTimeout   time.Duration
@@ -106,7 +110,8 @@ type ClientConfig struct {
 func NewClientConfig(apiKey *ApiKey) *ClientConfig {
 	return &ClientConfig{
 		EnableNotify:      false,
-		ClientName:        "QUANTAVERSE",
+		ClientName:        "CLIENT",
+		ChannelCapacity:   subscriptionChannelCapacity,
 		HeartbeatInterval: time.Second * 30,
 		ReconnectInterval: time.Second * 1,
 		ResponseTimeout:   time.Second * 10,
@@ -155,19 +160,19 @@ type MarketClient struct {
 	*Client
 }
 
-// NewMarketClient 建立市场数据会话；仅在 EnableNotify 开启时创建 Updating。
-func NewMarketClient(ctx context.Context, config *ClientConfig) (*MarketClient, *Updating, error) {
-	var senders *updatingSenders
-	var updating *Updating
+// NewMarketClient 建立市场数据会话；仅在 EnableNotify 开启时创建 MarketSubscription。
+func NewMarketClient(ctx context.Context, config *ClientConfig) (*MarketClient, *MarketSubscription, error) {
+	var senders *subscriptionSenders
+	var subscription *MarketSubscription
 	if config.EnableNotify {
-		senders, updating = initUpdating()
+		senders, subscription = initMarketSubscription(config.ChannelCapacity)
 	}
 
 	client, err := newClient(ctx, marketHost, config, senders)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &MarketClient{Client: client}, updating, nil
+	return &MarketClient{Client: client}, subscription, nil
 }
 
 func (c *MarketClient) InstrumentList(req *message.InstrumentListRequest) (*message.InstrumentList, error) {
@@ -182,55 +187,45 @@ func (c *MarketClient) InstrumentList(req *message.InstrumentListRequest) (*mess
 	return result, nil
 }
 
-func (c *MarketClient) MarketData(req *message.MarketDataRequest) ([]*message.MarketDataSnapshot, error) {
-	// 取消订阅不返回 Snapshot，并且必须先从断线重订阅列表中移除。
+func (c *MarketClient) MarketData(req *message.MarketDataRequest) error {
+	// 取消订阅没有成功响应，消息写入连接后即可返回。
 	if req.SubscriptionRequestType == message.SubscriptionRequestTypeUnsubscribe {
 		c.removeResubRequest(req.MDReqID)
-		return nil, c.request(req, false)
+		return c.request(req, false)
 	}
 
-	// 每个 Symbol 会返回一条初始 Snapshot，全部收齐前保留 response waiter。
-	responses, err := c.requestAndWaitMany(req, len(req.Symbols), req.MDReqID)
+	// 第一条 Snapshot 或 IncrementalRefresh 表示订阅成功，Reject 表示订阅失败。
+	_, err := c.requestAndWait(req, req.MDReqID)
 	if err != nil {
 		c.removeResubRequest(req.MDReqID)
-		return nil, err
+		return err
 	}
-	// 初始订阅成功后保存请求副本，重连完成时用于恢复订阅。
+	// 确认订阅成功后保存请求副本，重连完成时用于恢复订阅。
 	c.setResubRequest(req.MDReqID, cloneMarketDataRequest(req))
-
-	// 统一的 response channel 使用接口类型，这里校验并转换成具体 Snapshot slice。
-	result := make([]*message.MarketDataSnapshot, 0, len(responses))
-	for _, resp := range responses {
-		snapshot, ok := resp.(*message.MarketDataSnapshot)
-		if !ok {
-			return nil, unexpectedResponseError(resp, message.MsgTypeMarketDataSnapshot)
-		}
-		result = append(result, snapshot)
-	}
-	return result, nil
+	return nil
 }
 
 type OrderClient struct {
 	*Client
 }
 
-// NewOrderClient 建立订单会话；Updating 用于接收账户级 ExecutionReport 和 ListStatus 推送。
-func NewOrderClient(ctx context.Context, config *ClientConfig) (*OrderClient, *Updating, error) {
-	var senders *updatingSenders
-	var updating *Updating
+// NewOrderClient 建立订单会话；OrderSubscription 用于接收账户级 ExecutionReport 和 ListStatus 推送。
+func NewOrderClient(ctx context.Context, config *ClientConfig) (*OrderClient, *OrderSubscription, error) {
+	var senders *subscriptionSenders
+	var subscription *OrderSubscription
 	if config.EnableNotify {
-		senders, updating = initUpdating()
+		senders, subscription = initOrderSubscription(config.ChannelCapacity)
 	}
 
 	client, err := newClient(ctx, orderHost, config, senders)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &OrderClient{Client: client}, updating, nil
+	return &OrderClient{Client: client}, subscription, nil
 }
 
 func (c *OrderClient) NewOrderSingle(req *message.NewOrderSingle) (*message.ExecutionReport, error) {
-	// 首条匹配 ClOrdID 的 ExecutionReport 是同步 ACK，后续状态变化进入 Updating。
+	// 首条匹配 ClOrdID 的 ExecutionReport 是同步 ACK，后续状态变化进入 Subscription。
 	resp, err := c.requestAndWait(req, req.ClOrdID)
 	return executionReportResponse(resp, err)
 }
@@ -244,7 +239,7 @@ func (c *OrderClient) OrderCancel(req *message.OrderCancelRequest) (*message.Exe
 }
 
 func (c *OrderClient) OrderMassCancel(req *message.OrderMassCancelRequest) (*message.OrderMassCancelReport, error) {
-	// 这里只等待汇总报告；每个被取消订单的 ExecutionReport 属于账户级更新。
+	// 这里只等待汇总报告；每个被取消订单的 ExecutionReport 属于账户级订阅消息。
 	resp, err := c.requestAndWait(req, req.ClOrdID)
 	if err != nil {
 		return nil, err
@@ -263,7 +258,7 @@ func (c *OrderClient) OrderReplace(req *message.OrderCancelRequestAndNewOrderSin
 }
 
 func (c *OrderClient) ListStatus(req *message.NewOrderList) (*message.ListStatus, error) {
-	// ListStatus 是该请求的同步结果，各子订单的 ExecutionReport 通过 Updating 接收。
+	// ListStatus 是该请求的同步结果，各子订单的 ExecutionReport 通过 Subscription 接收。
 	resp, err := c.requestAndWait(req, req.ClListID)
 	if err != nil {
 		return nil, err
@@ -276,7 +271,7 @@ func (c *OrderClient) ListStatus(req *message.NewOrderList) (*message.ListStatus
 }
 
 func (c *OrderClient) OrderAmendKeepPriority(req *message.OrderAmendKeepPriorityRequest) (*message.ExecutionReport, error) {
-	// 修改结果由 ExecutionReport 确认；若订单属于列表，额外 ListStatus 会进入 Updating。
+	// 修改结果由 ExecutionReport 确认；若订单属于列表，额外 ListStatus 会进入 Subscription。
 	resp, err := c.requestAndWait(
 		req,
 		req.ClOrdID,
@@ -321,12 +316,12 @@ type Client struct {
 	resubReqLk sync.Mutex
 	resubReqs  map[string]message.Request
 
-	// updating 为 nil 时忽略所有未匹配请求的主动推送。
-	updating *updatingSenders
+	// subscription 为 nil 时忽略所有未匹配请求的主动推送。
+	subscription *subscriptionSenders
 }
 
 // newClient 完成 TLS 连接、FIX Logon，并启动消息和心跳两个后台协程。
-func newClient(ctx context.Context, host string, config *ClientConfig, updating *updatingSenders) (*Client, error) {
+func newClient(ctx context.Context, host string, config *ClientConfig, subscription *subscriptionSenders) (*Client, error) {
 	// ServerName 用于 TLS SNI 和证书主机名校验。
 	conn, err := tls.Dial("tcp", host+":9000", &tls.Config{
 		ServerName: host,
@@ -347,7 +342,7 @@ func newClient(ctx context.Context, host string, config *ClientConfig, updating 
 		respChannels:   make(map[string]*responseWaiter),
 		rejectChannels: make(map[uint32]chan responseResult),
 		resubReqs:      make(map[string]message.Request),
-		updating:       updating,
+		subscription:   subscription,
 	}
 	// 后台协程启动前先同步完成 Logon，确保调用方拿到的是可用会话。
 	if err = c.logon(); err != nil {
@@ -505,7 +500,7 @@ func (c *Client) resubscribing(ctx context.Context) bool {
 	return false
 }
 
-// dispatchMessage 解析消息类型，并将消息路由到心跳、请求 waiter 或 Updating。
+// dispatchMessage 解析消息类型，并将消息路由到心跳、请求 waiter 或 Subscription。
 // 返回 true 表示当前 FIX 会话应重连。
 func (c *Client) dispatchMessage(ctx context.Context, msg *message.Message) (bool, error) {
 	msgType, err := msg.MsgType()
@@ -562,13 +557,14 @@ func (c *Client) dispatchMessage(ctx context.Context, msg *message.Message) (boo
 		}
 		c.deliverResponse(resp.InstrumentReqID, resp)
 	case message.MsgTypeMarketDataSnapshot:
-		// 订阅多个 Symbol 时需要先收齐全部初始 Snapshot；waiter 完成后的 Snapshot 才是更新。
+		// 第一条行情完成订阅 waiter；行情本身始终保留在 Subscription 中供调用方消费。
 		resp := new(message.MarketDataSnapshot)
 		if err = resp.FromMessage(msg); err != nil {
 			return false, err
 		}
-		if !c.deliverResponse(resp.MDReqID, resp) && c.updating != nil {
-			sendUpdating(ctx, c.updating.marketData, message.Response(resp))
+		c.deliverResponse(resp.MDReqID, resp)
+		if c.subscription != nil {
+			sendSubscription[message.Response](ctx, c.subscription.marketData, resp)
 		}
 	case message.MsgTypeMarketDataRequestReject:
 		// 订阅被拒绝后不能继续参与重订阅，并立即终止该请求的 waiter。
@@ -579,13 +575,14 @@ func (c *Client) dispatchMessage(ctx context.Context, msg *message.Message) (boo
 		c.removeResubRequest(resp.MDReqID)
 		c.deliverResponseError(resp.MDReqID, resp)
 	case message.MsgTypeMarketDataIncrementalRefresh:
-		// 增量行情没有同步请求等待者，始终属于订阅更新。
+		// Trade 订阅以第一条增量行情确认成功，后续增量行情只进入 Subscription。
 		resp := new(message.MarketDataIncrementalRefresh)
 		if err = resp.FromMessage(msg); err != nil {
 			return false, err
 		}
-		if c.updating != nil {
-			sendUpdating(ctx, c.updating.marketData, message.Response(resp))
+		c.deliverResponse(resp.MDReqID, resp)
+		if c.subscription != nil {
+			sendSubscription[message.Response](ctx, c.subscription.marketData, resp)
 		}
 	case message.MsgTypeExecutionReport:
 		// Rejected 是请求错误；正常报告优先作为 ACK，未匹配 waiter 时作为账户级推送。
@@ -595,8 +592,8 @@ func (c *Client) dispatchMessage(ctx context.Context, msg *message.Message) (boo
 		}
 		if resp.ExecType == message.ExecTypeRejected {
 			c.deliverResponseError(resp.ClOrdID, resp)
-		} else if !c.deliverResponse(resp.ClOrdID, resp) && c.updating != nil {
-			sendUpdating(ctx, c.updating.orderExecution, resp)
+		} else if !c.deliverResponse(resp.ClOrdID, resp) && c.subscription != nil {
+			sendSubscription(ctx, c.subscription.orderExecution, resp)
 		}
 	case message.MsgTypeOrderCancelReject:
 		resp := new(message.OrderCancelReject)
@@ -629,8 +626,8 @@ func (c *Client) dispatchMessage(ctx context.Context, msg *message.Message) (boo
 		}
 		if resp.ListOrderStatus == message.ListOrderStatusReject {
 			c.deliverResponseError(resp.ClListID, resp)
-		} else if !c.deliverResponse(resp.ClListID, resp) && c.updating != nil {
-			sendUpdating(ctx, c.updating.orderListStatus, resp)
+		} else if !c.deliverResponse(resp.ClListID, resp) && c.subscription != nil {
+			sendSubscription(ctx, c.subscription.orderListStatus, resp)
 		}
 	default:
 		return false, fmt.Errorf("unexpected message type %s", msgType)
@@ -674,7 +671,7 @@ func (c *Client) sendTestReq() error {
 func (c *Client) sendHeartbeat(reqId string) error {
 	req := message.NewHeartbeat(reqId)
 	err := c.request(req, false)
-	if err != nil && errors.Is(err, ErrConnectionBroken) {
+	if err != nil && errors.Is(err, ErrReconnecting) {
 		return nil
 	}
 	return err
@@ -689,10 +686,7 @@ func (c *Client) logon() error {
 		int64(c.config.HeartbeatInterval.Seconds()),
 		message.MessageHandlingSequential,
 	)
-	// ResponseMode 仅属于订单接入会话，Market Data schema 未定义 tag 25036。
-	if c.host == orderHost {
-		req.WithResponseMode(c.config.ResponseMode)
-	}
+	req.WithResponseMode(c.config.ResponseMode)
 
 	// 每个新 FIX 会话的本地发送序列号从 1 开始，Logon 占用第一号。
 	c.id = 1
@@ -733,22 +727,13 @@ func (c *Client) request(req message.Request, block bool) error {
 	return err
 }
 
-// requestAndWait 是单响应请求的便捷封装。
+// requestAndWait 注册业务 ID，发送请求，并等待一条正常响应或任意错误。
 func (c *Client) requestAndWait(req message.Request, ids ...string) (message.Response, error) {
-	responses, err := c.requestAndWaitMany(req, 1, ids...)
-	if err != nil {
-		return nil, err
-	}
-	return responses[0], nil
-}
-
-// requestAndWaitMany 注册业务 ID，发送请求，并等待 expected 条正常响应或任意错误。
-func (c *Client) requestAndWaitMany(req message.Request, expected int, ids ...string) ([]message.Response, error) {
-	// channel 容量与预期响应数一致，消息读取协程无需等待调用方逐条消费。
-	ch := make(chan responseResult, expected)
+	// 单响应 channel 预留一个位置，消息读取协程无需等待调用方消费。
+	ch := make(chan responseResult, 1)
 	// 一个请求可能使用多个等价业务 ID；先去重再绑定到同一个 waiter。
 	ids = compactResponseIDs(ids)
-	c.registerRespWaiter(ids, ch, expected)
+	c.registerRespWaiter(ids, ch)
 
 	// 同一个 channel 也按 MsgSeqNum 注册，用于接收会话级 Reject。
 	seqNum, err := c.sendRequest(req, false, ch)
@@ -762,26 +747,20 @@ func (c *Client) requestAndWaitMany(req message.Request, expected int, ids ...st
 		c.removeRejectChannel(seqNum)
 	}()
 
-	// 多响应共享同一个总超时，而不是每收到一条就重新计时。
 	timer := time.NewTimer(c.config.ResponseTimeout)
 	defer timer.Stop()
 
-	// Reject 会通过 result.err 立即结束；正常响应则收集到 expected 条。
-	responses := make([]message.Response, 0, expected)
-	for len(responses) < expected {
-		select {
-		case result := <-ch:
-			if result.err != nil {
-				return nil, result.err
-			}
-			responses = append(responses, result.response)
-		case <-timer.C:
-			return nil, ErrResponseTimeout
-		case <-c.ctx.Done():
-			return nil, c.ctx.Err()
+	select {
+	case result := <-ch:
+		if result.err != nil {
+			return nil, result.err
 		}
+		return result.response, nil
+	case <-timer.C:
+		return nil, ErrResponseTimeout
+	case <-c.ctx.Done():
+		return nil, c.ctx.Err()
 	}
-	return responses, nil
 }
 
 // sendRequest 串行生成 MsgSeqNum、构造消息并写入当前 TLS 连接。
@@ -792,7 +771,7 @@ func (c *Client) sendRequest(req message.Request, block bool, rejectCh chan resp
 	} else {
 		// 外部请求不等待重连，立即返回连接不可用错误。
 		if !c.connLk.TryLock() {
-			return 0, ErrConnectionBroken
+			return 0, ErrReconnecting
 		}
 	}
 	defer c.connLk.Unlock()
@@ -834,8 +813,7 @@ func compactResponseIDs(ids []string) []string {
 }
 
 // registerRespWaiter 将所有等价业务 ID 指向同一个 waiter。
-// expected 控制同步响应边界，避免多响应请求的第二条消息被误判为主动推送。
-func (c *Client) registerRespWaiter(keys []string, ch chan responseResult, expected int) {
+func (c *Client) registerRespWaiter(keys []string, ch chan responseResult) {
 	if len(keys) == 0 {
 		return
 	}
@@ -845,9 +823,8 @@ func (c *Client) registerRespWaiter(keys []string, ch chan responseResult, expec
 
 	// 复制 keys，确保调用方后续复用原 slice 不会破坏 waiter 的清理列表。
 	waiter := &responseWaiter{
-		ch:        ch,
-		ids:       append([]string(nil), keys...),
-		remaining: expected,
+		ch:  ch,
+		ids: append([]string(nil), keys...),
 	}
 	for _, key := range keys {
 		c.respChannels[key] = waiter
@@ -881,7 +858,7 @@ func (c *Client) removeRejectChannel(seqNum uint32) {
 }
 
 // deliverResponse 尝试将正常响应投递给业务 ID 对应的 waiter。
-// 返回 false 表示没有同步请求在等待，该消息可继续作为 Updating 推送。
+// 返回 false 表示没有同步请求在等待，该消息可继续作为 Subscription 推送。
 func (c *Client) deliverResponse(id string, resp message.Response) bool {
 	return c.deliverResponseResult(id, responseResult{response: resp})
 }
@@ -891,7 +868,7 @@ func (c *Client) deliverResponseError(id string, err error) {
 	c.deliverResponseResult(id, responseResult{err: err})
 }
 
-// deliverResponseResult 更新 waiter 状态并投递一条结果。
+// deliverResponseResult 完成 waiter 并投递一条结果。
 func (c *Client) deliverResponseResult(id string, result responseResult) bool {
 	c.respChanLk.Lock()
 	waiter, ok := c.respChannels[id]
@@ -900,23 +877,15 @@ func (c *Client) deliverResponseResult(id string, result responseResult) bool {
 		return false
 	}
 
-	// 任意错误都会终止请求；正常响应则只消费一个预期响应名额。
-	if result.err != nil {
-		waiter.remaining = 0
-	} else {
-		waiter.remaining--
-	}
-	// waiter 完成时一次性删除全部别名，后续同 ID 消息将进入 Updating。
-	if waiter.remaining <= 0 {
-		for _, key := range waiter.ids {
-			if c.respChannels[key] == waiter {
-				delete(c.respChannels, key)
-			}
+	// 第一条正常响应或错误都会完成请求；后续同 ID 消息进入 Subscription。
+	for _, key := range waiter.ids {
+		if c.respChannels[key] == waiter {
+			delete(c.respChannels, key)
 		}
 	}
 	c.respChanLk.Unlock()
 
-	// channel 按预期响应数分配容量；default 只用于防御重复或竞态投递。
+	// channel 已预留一个位置；default 只用于防御异常重复或竞态投递。
 	select {
 	case waiter.ch <- result:
 	default:

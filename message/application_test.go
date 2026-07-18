@@ -66,7 +66,7 @@ func TestNewOrderSingleToMessage(t *testing.T) {
 }
 
 func TestExecutionReportFromMessage(t *testing.T) {
-	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=8|34=2|49=SPOT|52=20240611-09:01:46.228950|56=EXAMPLE|11=order-1|14=1.00000000|17=144|32=0.50000000|37=76|38=5.00000000|39=1|40=2|44=10.00000000|54=1|55=LTCBNB|59=4|60=20240611-09:01:46.228000|150=F|151=4.00000000|636=Y|1057=Y|25001=1|25017=5.00000000|25018=20240611-09:01:46.228000|25023=20240611-09:01:46.228000|25032=Y|10=000|"))
+	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=8|34=2|49=SPOT|52=20240611-09:01:46.228950|56=EXAMPLE|11=order-1|14=1.00000000|17=144|32=0.50000000|37=76|38=5.00000000|39=1|40=2|44=10.00000000|54=1|55=LTCBNB|59=4|60=20240611-09:01:46.228000|150=F|151=4.00000000|636=Y|1057=Y|25001=1|25017=5.00000000|25018=20240611-09:01:46.228000|25023=20240611-09:01:46.228000|25032=Y|136=2|137=0.001|138=BNB|139=4|137=0.002|138=USDT|139=4|10=000|"))
 	if err != nil {
 		t.Fatalf("ParseMessage() error = %v", err)
 	}
@@ -108,6 +108,15 @@ func TestExecutionReportFromMessage(t *testing.T) {
 	}
 	if report.SOR != "Y" {
 		t.Fatalf("SOR = %q, want %q", report.SOR, "Y")
+	}
+	if report.NoMiscFees != "2" || len(report.MiscFees) != 2 {
+		t.Fatalf("NoMiscFees = %q, len(MiscFees) = %d, want 2", report.NoMiscFees, len(report.MiscFees))
+	}
+	if got := report.MiscFees[0]; got.MiscFeeAmt != "0.001" || got.MiscFeeCurr != "BNB" || got.MiscFeeType != MiscFeeTypeExchangeFees {
+		t.Fatalf("MiscFees[0] = %+v", got)
+	}
+	if got := report.MiscFees[1]; got.MiscFeeAmt != "0.002" || got.MiscFeeCurr != "USDT" || got.MiscFeeType != MiscFeeTypeExchangeFees {
+		t.Fatalf("MiscFees[1] = %+v", got)
 	}
 }
 
@@ -192,6 +201,40 @@ func TestNewOrderListToMessageRepeatingOrders(t *testing.T) {
 	}
 }
 
+func TestListStatusFromMessageRepeatingOrders(t *testing.T) {
+	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=N|34=2|49=SPOT|52=20240607-02:19:07.837191|56=EXAMPLE|60=20240607-02:19:07.836000|66=25|73=2|55=BTCUSDT|37=52|11=working-1|55=BTCUSDT|37=53|11=pending-1|25010=2|25011=3|25012=0|25013=1|25011=1|25012=2|25013=2|429=4|431=3|1385=2|25014=list-1|25015=orig-list-1|10=000|"))
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+
+	response := new(ListStatus)
+	if err = response.FromMessage(message); err != nil {
+		t.Fatalf("FromMessage() error = %v", err)
+	}
+	if response.Symbol != "" {
+		t.Fatalf("top-level Symbol = %q, want empty", response.Symbol)
+	}
+	if response.NoOrders != "2" || len(response.Orders) != 2 {
+		t.Fatalf("NoOrders = %q, len(Orders) = %d, want 2", response.NoOrders, len(response.Orders))
+	}
+	if got := response.Orders[0]; got.Symbol != "BTCUSDT" || got.OrderID != "52" || got.ClOrdID != "working-1" {
+		t.Fatalf("Orders[0] = %+v", got)
+	}
+	second := response.Orders[1]
+	if second.Symbol != "BTCUSDT" || second.OrderID != "53" || second.ClOrdID != "pending-1" {
+		t.Fatalf("Orders[1] = %+v", second)
+	}
+	if second.NoListTriggeringInstructions != "2" || len(second.ListTriggeringInstructions) != 2 {
+		t.Fatalf("Orders[1] nested count = %q, len = %d, want 2", second.NoListTriggeringInstructions, len(second.ListTriggeringInstructions))
+	}
+	if got := second.ListTriggeringInstructions[0]; got.ListTriggerType != ListTriggerTypeFilled || got.ListTriggerTriggerIndex != "0" || got.ListTriggerAction != ListTriggerActionRelease {
+		t.Fatalf("Orders[1].ListTriggeringInstructions[0] = %+v", got)
+	}
+	if got := second.ListTriggeringInstructions[1]; got.ListTriggerType != ListTriggerTypeActivated || got.ListTriggerTriggerIndex != "2" || got.ListTriggerAction != ListTriggerActionCancel {
+		t.Fatalf("Orders[1].ListTriggeringInstructions[1] = %+v", got)
+	}
+}
+
 func TestMarketDataRequestToMessageRepeatingGroups(t *testing.T) {
 	aggregatedBook := true
 	request := NewMarketDataRequest("BOOK_TICKER_STREAM", SubscriptionRequestTypeSubscribe)
@@ -224,6 +267,67 @@ func TestMarketDataRequestToMessageRepeatingGroups(t *testing.T) {
 	}
 }
 
+func TestMarketDataSnapshotFromMessageRepeatingGroup(t *testing.T) {
+	msg, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=W|52=20241019-05:41:52.867164|262=DEPTH_1|55=BTCUSDT|25044=100|268=2|269=0|270=65000.10|271=1.25|269=1|270=65000.20|271=2.50|10=000|"))
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+
+	response := new(MarketDataSnapshot)
+	if err = response.FromMessage(msg); err != nil {
+		t.Fatalf("FromMessage() error = %v", err)
+	}
+	if response.NoMDEntries != "2" || len(response.Entries) != 2 {
+		t.Fatalf("NoMDEntries = %q, len(Entries) = %d, want 2", response.NoMDEntries, len(response.Entries))
+	}
+	if got := response.Entries[0]; got.MDEntryType != MDEntryTypeBid || got.MDEntryPx != "65000.10" || got.MDEntrySize != "1.25" {
+		t.Fatalf("Entries[0] = %+v", got)
+	}
+	if got := response.Entries[1]; got.MDEntryType != MDEntryTypeOffer || got.MDEntryPx != "65000.20" || got.MDEntrySize != "2.50" {
+		t.Fatalf("Entries[1] = %+v", got)
+	}
+}
+
+func TestMarketDataIncrementalRefreshFromMessageRepeatingGroup(t *testing.T) {
+	msg, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=X|52=20241019-05:40:11.466313|262=TRADE_3|268=3|279=0|269=2|270=10.00000|271=0.01000|55=BNBBUSD|1003=0|60=20241019-05:40:11.464000|2446=1|25043=100|25044=102|279=0|269=2|270=10.00000|271=0.02000|1003=1|60=20241019-05:40:11.465000|279=0|269=2|270=10.00000|271=0.03000|1003=2|60=20241019-05:40:11.466000|10=000|"))
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+
+	response := new(MarketDataIncrementalRefresh)
+	if err = response.FromMessage(msg); err != nil {
+		t.Fatalf("FromMessage() error = %v", err)
+	}
+	if response.NoMDEntries != "3" || len(response.Entries) != 3 {
+		t.Fatalf("NoMDEntries = %q, len(Entries) = %d, want 3", response.NoMDEntries, len(response.Entries))
+	}
+	first := response.Entries[0]
+	if first.MDUpdateAction != MDUpdateActionNew || first.MDEntryType != MDEntryTypeTrade || first.AggressorSide != AggressorSideBuy {
+		t.Fatalf("Entries[0] = %+v", first)
+	}
+	if first.Symbol != "BNBBUSD" || first.FirstBookUpdateID != "100" || first.LastBookUpdateID != "102" {
+		t.Fatalf("Entries[0] inherited fields = %+v", first)
+	}
+	for i, entry := range response.Entries[1:] {
+		if entry.Symbol != "BNBBUSD" || entry.FirstBookUpdateID != "100" || entry.LastBookUpdateID != "102" {
+			t.Fatalf("Entries[%d] inherited fields = %+v", i+1, entry)
+		}
+	}
+	if response.Entries[2].TradeID != "2" || response.Entries[2].MDEntrySize != "0.03000" {
+		t.Fatalf("Entries[2] = %+v", response.Entries[2])
+	}
+}
+
+func TestMarketDataSnapshotFromMessageRejectsGroupCountMismatch(t *testing.T) {
+	msg, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=W|52=20241019-05:41:52.867164|262=DEPTH_1|55=BTCUSDT|268=2|269=0|270=65000.10|271=1.25|10=000|"))
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if err = new(MarketDataSnapshot).FromMessage(msg); err == nil {
+		t.Fatal("FromMessage() error = nil, want group count mismatch")
+	}
+}
+
 func TestLimitResponseFromMessage(t *testing.T) {
 	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=XLR|34=2|49=SPOT|52=20240614-05:42:42.724057|56=EXAMPLE|6136=req-1|25003=2|25004=2|25005=1|25006=1000|25007=10|25008=s|25004=1|25005=0|25006=200|10=000|"))
 	if err != nil {
@@ -240,6 +344,15 @@ func TestLimitResponseFromMessage(t *testing.T) {
 	}
 	if response.NoLimitIndicators != "2" {
 		t.Fatalf("NoLimitIndicators = %q, want %q", response.NoLimitIndicators, "2")
+	}
+	if len(response.LimitIndicators) != 2 {
+		t.Fatalf("len(LimitIndicators) = %d, want 2", len(response.LimitIndicators))
+	}
+	if got := response.LimitIndicators[0]; got.LimitType != LimitTypeMessage || got.LimitCount != "1" || got.LimitMax != "1000" || got.LimitResetInterval != "10" || got.LimitResetIntervalResolution != LimitResetIntervalResolutionSecond {
+		t.Fatalf("LimitIndicators[0] = %+v", got)
+	}
+	if got := response.LimitIndicators[1]; got.LimitType != LimitTypeOrder || got.LimitCount != "0" || got.LimitMax != "200" {
+		t.Fatalf("LimitIndicators[1] = %+v", got)
 	}
 }
 
@@ -264,6 +377,132 @@ func TestInstrumentListRequestToMessage(t *testing.T) {
 		t.Fatalf("ToMessage() error = %v", err)
 	}
 	assertField(t, message, TagSymbol, "BTCUSDT")
+}
+
+func TestInstrumentListFromMessageRepeatingGroup(t *testing.T) {
+	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=y|49=SPOT|56=EXAMPLE|34=2|52=20250114-08:46:56.100147|320=ALL_INFO|146=2|55=BTCUSDT|15=USDT|562=0.00001000|1140=9000.00000000|25039=0.00001000|25040=0.00000001|25041=76.79001236|25042=0.00000001|969=0.01000000|2551=0.01|2552=1000000|55=ETHBTC|15=BTC|562=0.00010000|1140=100000.00000000|25039=0.00010000|969=0.00000001|10=000|"))
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+
+	response := new(InstrumentList)
+	if err = response.FromMessage(message); err != nil {
+		t.Fatalf("FromMessage() error = %v", err)
+	}
+	if response.InstrumentReqID != "ALL_INFO" || response.NoRelatedSym != "2" || len(response.Instruments) != 2 {
+		t.Fatalf("response = %+v", response)
+	}
+	first := response.Instruments[0]
+	if first.Symbol != "BTCUSDT" || first.Currency != "USDT" || first.MinTradeVol != "0.00001000" || first.MaxTradeVol != "9000.00000000" {
+		t.Fatalf("Instruments[0] = %+v", first)
+	}
+	if first.MarketMinTradeVol != "0.00000001" || first.MarketMaxTradeVol != "76.79001236" || first.MarketMinQtyIncrement != "0.00000001" {
+		t.Fatalf("Instruments[0] market limits = %+v", first)
+	}
+	if first.MinPriceIncrement != "0.01000000" || first.StartPriceRange != "0.01" || first.EndPriceRange != "1000000" {
+		t.Fatalf("Instruments[0] price limits = %+v", first)
+	}
+	if got := response.Instruments[1]; got.Symbol != "ETHBTC" || got.Currency != "BTC" || got.MinQtyIncrement != "0.00010000" || got.MinPriceIncrement != "0.00000001" {
+		t.Fatalf("Instruments[1] = %+v", got)
+	}
+}
+
+func TestResponseRepeatingGroupsRejectCountMismatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		response Response
+	}{
+		{
+			name:     "execution report fees",
+			raw:      "8=FIX.4.4|9=1|35=8|40=2|54=1|55=BTCUSDT|150=F|14=1|32=1|39=2|136=2|137=0.1|138=USDT|139=4|10=000|",
+			response: new(ExecutionReport),
+		},
+		{
+			name:     "list status orders",
+			raw:      "8=FIX.4.4|9=1|35=N|429=4|431=3|73=2|55=BTCUSDT|37=1|11=order-1|10=000|",
+			response: new(ListStatus),
+		},
+		{
+			name:     "limit indicators",
+			raw:      "8=FIX.4.4|9=1|35=XLR|6136=req-1|25003=2|25004=1|25005=0|25006=200|10=000|",
+			response: new(LimitResponse),
+		},
+		{
+			name:     "instruments",
+			raw:      "8=FIX.4.4|9=1|35=y|320=req-1|146=2|55=BTCUSDT|15=USDT|10=000|",
+			response: new(InstrumentList),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			message, err := ParseMessage(withSOH(tt.raw))
+			if err != nil {
+				t.Fatalf("ParseMessage() error = %v", err)
+			}
+			if err = tt.response.FromMessage(message); err == nil {
+				t.Fatal("FromMessage() error = nil, want group count mismatch")
+			}
+		})
+	}
+}
+
+func TestListStatusRejectsNestedGroupCountMismatch(t *testing.T) {
+	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=N|429=4|431=3|73=1|55=BTCUSDT|37=1|11=order-1|25010=2|25011=3|25012=0|25013=1|10=000|"))
+	if err != nil {
+		t.Fatalf("ParseMessage() error = %v", err)
+	}
+	if err = new(ListStatus).FromMessage(message); err == nil {
+		t.Fatal("FromMessage() error = nil, want nested group count mismatch")
+	}
+}
+
+func TestApplicationRejectErrorsOnlyIncludeErrorCodeAndText(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "execution report",
+			err:  &ExecutionReport{ClOrdID: "order-1", ErrorCode: "-1013", Text: "Invalid quantity"},
+			want: "order rejected, errorCode=-1013, text=Invalid quantity",
+		},
+		{
+			name: "order cancel reject",
+			err:  &OrderCancelReject{ClOrdID: "cancel-1", ErrorCode: "-2011", Text: "Unknown order"},
+			want: "order cancel reject, errorCode=-2011, text=Unknown order",
+		},
+		{
+			name: "order mass cancel reject",
+			err:  &OrderMassCancelReport{ClOrdID: "cancel-all-1", ErrorCode: "-1102", Text: "Missing symbol"},
+			want: "order mass cancel reject, errorCode=-1102, text=Missing symbol",
+		},
+		{
+			name: "list status",
+			err:  &ListStatus{ClListID: "list-1", ErrorCode: "-1013", Text: "Invalid list"},
+			want: "order list reject, errorCode=-1013, text=Invalid list",
+		},
+		{
+			name: "order amend reject",
+			err:  &OrderAmendReject{ClOrdID: "amend-1", ErrorCode: "-2010", Text: "Amend rejected"},
+			want: "order amend reject, errorCode=-2010, text=Amend rejected",
+		},
+		{
+			name: "market data request reject",
+			err:  &MarketDataRequestReject{MDReqID: "md-1", ErrorCode: "-1191", Text: "Too many subscriptions"},
+			want: "market data request reject, errorCode=-1191, text=Too many subscriptions",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.Error(); got != tt.want {
+				t.Fatalf("Error() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func assertDisplayContains(t *testing.T, display string, want string) {
