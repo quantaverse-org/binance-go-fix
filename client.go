@@ -106,7 +106,7 @@ type ClientConfig struct {
 func NewClientConfig(apiKey *ApiKey) *ClientConfig {
 	return &ClientConfig{
 		EnableNotify:      false,
-		ClientName:        "quantaverse",
+		ClientName:        "QUANTAVERSE",
 		HeartbeatInterval: time.Second * 30,
 		ReconnectInterval: time.Second * 1,
 		ResponseTimeout:   time.Second * 10,
@@ -682,14 +682,17 @@ func (c *Client) sendHeartbeat(reqId string) error {
 
 // logon 构造签名后的 Logon 请求，并同步验证服务端返回的第一条消息。
 func (c *Client) logon() error {
-	// Logon 携带 API Key、Ed25519 签名参数、心跳间隔和响应模式。
+	// Logon 携带 API Key、Ed25519 签名参数和心跳间隔。
 	req := message.NewLogonRequest(
 		c.config.ApiKey.UserName,
 		c.config.ApiKey.PrivateKey,
 		int64(c.config.HeartbeatInterval.Seconds()),
 		message.MessageHandlingSequential,
 	)
-	req.WithResponseMode(c.config.ResponseMode)
+	// ResponseMode 仅属于订单接入会话，Market Data schema 未定义 tag 25036。
+	if c.host == orderHost {
+		req.WithResponseMode(c.config.ResponseMode)
+	}
 
 	// 每个新 FIX 会话的本地发送序列号从 1 开始，Logon 占用第一号。
 	c.id = 1
@@ -1016,13 +1019,13 @@ func (c *Client) writeMessage(msg *message.Message) error {
 func (c *Client) readMessage() (*message.Message, error) {
 	// 一个心跳周期内没有任何入站数据时返回超时，由上层执行连接探测。
 	if err := c.conn.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval)); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to set read deadline: %w", err)
 	}
 
 	// BeginString 是首个 SOH 分隔字段，可用于快速拒绝非 FIX 4.4 数据。
 	beginStr, err := c.reader.ReadString(message.SOH)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read SOH: %w", err)
 	}
 	if beginStr != "8=FIX.4.4\x01" {
 		return nil, fmt.Errorf("invalid begin string: %s", beginStr)
@@ -1031,7 +1034,7 @@ func (c *Client) readMessage() (*message.Message, error) {
 	// BodyLength 是第二个字段，表示从 MsgType 起到 CheckSum 前的字节数。
 	bodyLenStr, err := c.reader.ReadString(message.SOH)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read SOH: %w", err)
 	}
 	bls := strings.TrimPrefix(bodyLenStr, "9=")
 	bls = strings.TrimSuffix(bls, "\x01")
@@ -1042,10 +1045,14 @@ func (c *Client) readMessage() (*message.Message, error) {
 
 	// CheckSum 固定为 "10=xxx<SOH>" 共 7 字节，因此在 BodyLength 基础上额外读取 7 字节。
 	buf := make([]byte, bodyLen+7)
-	_, err = io.ReadFull(c.reader, buf)
+	n, err := io.ReadFull(c.reader, buf)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read body and checksum (%d/%d bytes): %w", n, len(buf), err)
 	}
 
-	return message.ParseMessage(beginStr + bodyLenStr + string(buf))
+	msg, err := message.ParseMessage(beginStr + bodyLenStr + string(buf))
+	if err != nil {
+		return nil, fmt.Errorf("parse FIX message: %w", err)
+	}
+	return msg, nil
 }
