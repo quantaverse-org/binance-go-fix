@@ -686,7 +686,10 @@ func (c *Client) logon() error {
 		int64(c.config.HeartbeatInterval.Seconds()),
 		message.MessageHandlingSequential,
 	)
-	req.WithResponseMode(c.config.ResponseMode)
+	// ResponseMode 仅适用于订单会话，market data 会话携带该字段会被拒绝。
+	if c.host == orderHost {
+		req.WithResponseMode(c.config.ResponseMode)
+	}
 
 	// 每个新 FIX 会话的本地发送序列号从 1 开始，Logon 占用第一号。
 	c.id = 1
