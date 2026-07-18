@@ -106,7 +106,7 @@ type ClientConfig struct {
 func NewClientConfig(apiKey *ApiKey) *ClientConfig {
 	return &ClientConfig{
 		EnableNotify:      false,
-		ClientName:        apiKey.UserName,
+		ClientName:        "quantaverse",
 		HeartbeatInterval: time.Second * 30,
 		ReconnectInterval: time.Second * 1,
 		ResponseTimeout:   time.Second * 10,
@@ -333,7 +333,7 @@ func newClient(ctx context.Context, host string, config *ClientConfig, updating 
 		MinVersion: tls.VersionTLS12,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
 
 	c := &Client{
@@ -352,7 +352,7 @@ func newClient(ctx context.Context, host string, config *ClientConfig, updating 
 	// 后台协程启动前先同步完成 Logon，确保调用方拿到的是可用会话。
 	if err = c.logon(); err != nil {
 		_ = c.conn.Close()
-		return nil, err
+		return nil, fmt.Errorf("failed to logon: %w", err)
 	}
 	go c.handlingMessage(ctx)   // 唯一的网络读取和消息分发协程。
 	go c.handlingHeartbeat(ctx) // 定时心跳以及 TestRequest 响应协程。
