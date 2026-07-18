@@ -1487,6 +1487,7 @@ func (r *MarketDataRequestReject) Error() string {
 
 type MarketDataSnapshot struct {
 	MDReqID          string
+	SendingTime      time.Time
 	Symbol           string
 	LastBookUpdateID string
 	NoMDEntries      string
@@ -1512,6 +1513,10 @@ func (r *MarketDataSnapshot) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
+	sendingTime, err := m.SendingTime()
+	if err != nil {
+		return err
+	}
 	symbol, err := requiredString(m, TagSymbol)
 	if err != nil {
 		return err
@@ -1522,6 +1527,7 @@ func (r *MarketDataSnapshot) FromMessage(m *Message) error {
 	}
 
 	r.MDReqID = mdReqID
+	r.SendingTime = sendingTime
 	r.Symbol = symbol
 	r.LastBookUpdateID = optionalString(m, TagLastBookUpdateID)
 	r.NoMDEntries = noMDEntries
@@ -1531,6 +1537,7 @@ func (r *MarketDataSnapshot) FromMessage(m *Message) error {
 
 type MarketDataIncrementalRefresh struct {
 	MDReqID     string
+	SendingTime time.Time
 	NoMDEntries string
 	Entries     []MarketDataIncrementalRefreshEntry
 }
@@ -1561,12 +1568,17 @@ func (r *MarketDataIncrementalRefresh) FromMessage(m *Message) error {
 	if err != nil {
 		return err
 	}
+	sendingTime, err := m.SendingTime()
+	if err != nil {
+		return err
+	}
 	noMDEntries, entries, err := parseMarketDataIncrementalRefreshEntries(m)
 	if err != nil {
 		return err
 	}
 
 	r.MDReqID = mdReqID
+	r.SendingTime = sendingTime
 	r.NoMDEntries = noMDEntries
 	r.Entries = entries
 	return nil

@@ -3,6 +3,7 @@ package message
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewOrderSingleToMessage(t *testing.T) {
@@ -280,6 +281,9 @@ func TestMarketDataSnapshotFromMessageRepeatingGroup(t *testing.T) {
 	if response.NoMDEntries != "2" || len(response.Entries) != 2 {
 		t.Fatalf("NoMDEntries = %q, len(Entries) = %d, want 2", response.NoMDEntries, len(response.Entries))
 	}
+	if got, want := response.SendingTime, mustParseTimestamp(t, "20241019-05:41:52.867164"); !got.Equal(want) {
+		t.Fatalf("SendingTime = %v, want %v", got, want)
+	}
 	if got := response.Entries[0]; got.MDEntryType != MDEntryTypeBid || got.MDEntryPx != "65000.10" || got.MDEntrySize != "1.25" {
 		t.Fatalf("Entries[0] = %+v", got)
 	}
@@ -300,6 +304,9 @@ func TestMarketDataIncrementalRefreshFromMessageRepeatingGroup(t *testing.T) {
 	}
 	if response.NoMDEntries != "3" || len(response.Entries) != 3 {
 		t.Fatalf("NoMDEntries = %q, len(Entries) = %d, want 3", response.NoMDEntries, len(response.Entries))
+	}
+	if got, want := response.SendingTime, mustParseTimestamp(t, "20241019-05:40:11.466313"); !got.Equal(want) {
+		t.Fatalf("SendingTime = %v, want %v", got, want)
 	}
 	first := response.Entries[0]
 	if first.MDUpdateAction != MDUpdateActionNew || first.MDEntryType != MDEntryTypeTrade || first.AggressorSide != AggressorSideBuy {
@@ -511,4 +518,13 @@ func assertDisplayContains(t *testing.T, display string, want string) {
 	if !strings.Contains(display, want) {
 		t.Fatalf("Display() = %q, want substring %q", display, want)
 	}
+}
+
+func mustParseTimestamp(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := ParseTimestamp(value)
+	if err != nil {
+		t.Fatalf("ParseTimestamp(%q) error = %v", value, err)
+	}
+	return parsed
 }

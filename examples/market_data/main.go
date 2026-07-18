@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	fix "binance-go-fix"
 	"binance-go-fix/message"
@@ -119,16 +120,12 @@ var mainCmd = gcmd.Command{
 				if !ok {
 					return ctx.Err()
 				}
+				now := time.Now()
 				switch update := update.(type) {
 				case *message.MarketDataSnapshot:
-					g.Log().Infof(ctx, "snapshot request=%s symbol=%s entries=%+v last_update_id=%s",
-						update.MDReqID,
-						update.Symbol,
-						update.Entries,
-						update.LastBookUpdateID,
-					)
+					g.Log().Infof(ctx, "snapshot latency=%s", now.Sub(update.SendingTime))
 				case *message.MarketDataIncrementalRefresh:
-					g.Log().Infof(ctx, "incremental request=%s entries=%+v", update.MDReqID, update.Entries)
+					g.Log().Infof(ctx, "incremental latency=%s", now.Sub(update.SendingTime))
 				}
 			}
 		}
