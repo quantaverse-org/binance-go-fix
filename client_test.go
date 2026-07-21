@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"binance-go-fix/message"
+	"github.com/quantaverse-org/binance-go-fix/message"
 )
 
 func TestClientConfigWithMethods(t *testing.T) {

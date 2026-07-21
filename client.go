@@ -1,13 +1,13 @@
 package binance_go_fix
 
 import (
-	"binance-go-fix/message"
 	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/quantaverse-org/binance-go-fix/message"
 	"io"
 	"os"
 	"strconv"

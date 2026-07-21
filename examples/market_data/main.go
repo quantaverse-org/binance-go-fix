@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	fix "binance-go-fix"
-	"binance-go-fix/message"
+	fix "github.com/quantaverse-org/binance-go-fix"
+	"github.com/quantaverse-org/binance-go-fix/message"
 
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/os/gcmd"

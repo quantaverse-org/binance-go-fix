@@ -1,4 +1,4 @@
-module binance-go-fix
+module github.com/quantaverse-org/binance-go-fix
 
 go 1.26
 
