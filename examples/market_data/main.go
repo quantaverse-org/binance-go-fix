@@ -85,7 +85,7 @@ var mainCmd = gcmd.Command{
 			if depthConfig == nil {
 				return errors.New("depth is required for orderbook stream")
 			}
-			request.MarketDepth = strings.TrimSpace(depthConfig.String())
+			request.MarketDepth = depthConfig.Int64()
 			request.AggregatedBook = new(true)
 			request.MDEntryTypes = []message.MDEntryType{
 				message.MDEntryTypeBid,
@@ -126,9 +126,7 @@ var mainCmd = gcmd.Command{
 					g.Log().Infof(ctx, "snapshot latency=%s", now.Sub(update.SendingTime))
 				case *message.MarketDataIncrementalRefresh:
 					for _, entry := range update.Entries {
-						//t, _ := strconv.ParseInt(entry.TransactTime, 10, 64)
-						//timestamp := time.UnixMilli(t)
-						g.Log().Infof(ctx, "incremental latency=%s", entry.TransactTime)
+						g.Log().Infof(ctx, "incremental latency=%s", now.Sub(entry.TransactTime))
 					}
 				}
 			}

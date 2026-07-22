@@ -52,7 +52,7 @@ func TestMsgBuilderBuild(t *testing.T) {
 		}
 	}
 
-	wantPrefix := "8=FIX.4.4\x019=55\x0134=1\x0135=0\x0149=SENDER\x0156=TARGET\x0152=20011217-09:30:47.123\x01"
+	wantPrefix := "8=FIX.4.4\x019=55\x0135=0\x0149=SENDER\x0156=TARGET\x0134=1\x0152=20011217-09:30:47.123\x01"
 	if !strings.HasPrefix(message.rawMessage, wantPrefix) {
 		t.Fatalf("rawMessage = %q, want prefix %q", message.rawMessage, wantPrefix)
 	}
