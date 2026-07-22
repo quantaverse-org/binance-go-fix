@@ -54,8 +54,7 @@ func TestDispatchMessageSendsMarketDataIncrementalUpdate(t *testing.T) {
 		t.Fatalf("ParseMessage() error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	senders, subscription := initMarketSubscription(1)
 	client := &Client{
 		config:       &ClientConfig{ClientName: "test-client"},
@@ -107,8 +106,7 @@ func TestDispatchMessageSendsOrderExecutionUpdate(t *testing.T) {
 		t.Fatalf("ParseMessage() error = %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	senders, subscription := initOrderSubscription(1)
 	client := &Client{
 		config:       &ClientConfig{ClientName: "test-client"},
