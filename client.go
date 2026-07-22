@@ -7,13 +7,14 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/quantaverse-org/binance-go-fix/message"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/quantaverse-org/binance-go-fix/message"
 
 	"github.com/gogf/gf/v2/frame/g"
 )
@@ -353,6 +354,13 @@ func newClient(ctx context.Context, host string, config *ClientConfig, subscript
 	go c.handlingHeartbeat(ctx) // 定时心跳以及 TestRequest 响应协程。
 
 	return c, nil
+}
+
+func (c *Client) UtilClosed(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+	case <-c.closed:
+	}
 }
 
 // handlingMessage 持续读取完整 FIX 消息，并负责断线检测、分发和重连。
