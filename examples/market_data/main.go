@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -127,9 +126,9 @@ var mainCmd = gcmd.Command{
 					g.Log().Infof(ctx, "snapshot latency=%s", now.Sub(update.SendingTime))
 				case *message.MarketDataIncrementalRefresh:
 					for _, entry := range update.Entries {
-						t, _ := strconv.ParseInt(entry.TransactTime, 10, 64)
-						timestamp := time.UnixMilli(t)
-						g.Log().Infof(ctx, "incremental entry=%s latency=%s", entry.MDEntryType, now.Sub(timestamp))
+						//t, _ := strconv.ParseInt(entry.TransactTime, 10, 64)
+						//timestamp := time.UnixMilli(t)
+						g.Log().Infof(ctx, "incremental latency=%s", entry.TransactTime)
 					}
 				}
 			}
