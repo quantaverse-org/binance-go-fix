@@ -66,12 +66,15 @@ var mainCmd = gcmd.Command{
 		}
 
 		config := fix.NewClientConfig(apiKey).WithEnableNotify()
-		client, subscription, err := fix.NewMarketClient(ctx, config)
+		client, subscription, err := fix.NewMarketClient(config)
 		if err != nil {
 			return fmt.Errorf("connect market data client: %w", err)
 		}
 		if subscription == nil {
 			return errors.New("market data subscription channel is disabled")
+		}
+		if err = client.Run(ctx); err != nil {
+			return fmt.Errorf("client failed to run: %w", err)
 		}
 
 		requestID := nanoid.MustGenerate(alphabet, 16)
@@ -95,7 +98,7 @@ var mainCmd = gcmd.Command{
 			request.MDEntryTypes = []message.MDEntryType{message.MDEntryTypeTrade}
 		}
 
-		if err = client.MarketData(request); err != nil {
+		if err = client.MarketData(ctx, request); err != nil {
 			return fmt.Errorf("subscribe market data: %w", err)
 		}
 		g.Log().Infof(ctx, "subscribed request=%s stream=%s symbols=%s",
@@ -107,7 +110,7 @@ var mainCmd = gcmd.Command{
 		defer func() {
 			unsubscribe := message.NewMarketDataRequest(requestID, message.SubscriptionRequestTypeUnsubscribe)
 			unsubscribe.MarketDepth = request.MarketDepth
-			if unsubscribeErr := client.MarketData(unsubscribe); unsubscribeErr != nil {
+			if unsubscribeErr := client.MarketData(ctx, unsubscribe); unsubscribeErr != nil {
 				g.Log().Errorf(ctx, "unsubscribe market data: %v", unsubscribeErr)
 			}
 		}()

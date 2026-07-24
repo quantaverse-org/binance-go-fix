@@ -162,22 +162,22 @@ type MarketClient struct {
 }
 
 // NewMarketClient 建立市场数据会话；仅在 EnableNotify 开启时创建 MarketSubscription。
-func NewMarketClient(ctx context.Context, config *ClientConfig) (*MarketClient, *MarketSubscription, error) {
+func NewMarketClient(config *ClientConfig) (*MarketClient, *MarketSubscription, error) {
 	var senders *subscriptionSenders
 	var subscription *MarketSubscription
 	if config.EnableNotify {
 		senders, subscription = initMarketSubscription(config.ChannelCapacity)
 	}
 
-	client, err := newClient(ctx, marketHost, config, senders)
+	client, err := newClient(marketHost, config, senders)
 	if err != nil {
 		return nil, nil, err
 	}
 	return &MarketClient{Client: client}, subscription, nil
 }
 
-func (c *MarketClient) InstrumentList(req *message.InstrumentListRequest) (*message.InstrumentList, error) {
-	resp, err := c.requestAndWait(req, req.InstrumentReqID)
+func (c *MarketClient) InstrumentList(ctx context.Context, req *message.InstrumentListRequest) (*message.InstrumentList, error) {
+	resp, err := c.requestAndWait(ctx, req, req.InstrumentReqID)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,7 @@ func (c *MarketClient) InstrumentList(req *message.InstrumentListRequest) (*mess
 	return result, nil
 }
 
-func (c *MarketClient) MarketData(req *message.MarketDataRequest) error {
+func (c *MarketClient) MarketData(ctx context.Context, req *message.MarketDataRequest) error {
 	// 取消订阅没有成功响应，消息写入连接后即可返回。
 	if req.SubscriptionRequestType == message.SubscriptionRequestTypeUnsubscribe {
 		c.removeResubRequest(req.MDReqID)
@@ -196,7 +196,7 @@ func (c *MarketClient) MarketData(req *message.MarketDataRequest) error {
 	}
 
 	// 第一条 Snapshot 或 IncrementalRefresh 表示订阅成功，Reject 表示订阅失败。
-	_, err := c.requestAndWait(req, req.MDReqID)
+	_, err := c.requestAndWait(ctx, req, req.MDReqID)
 	if err != nil {
 		c.removeResubRequest(req.MDReqID)
 		return err
@@ -211,37 +211,34 @@ type OrderClient struct {
 }
 
 // NewOrderClient 建立订单会话；OrderSubscription 用于接收账户级 ExecutionReport 和 ListStatus 推送。
-func NewOrderClient(ctx context.Context, config *ClientConfig) (*OrderClient, *OrderSubscription, error) {
+func NewOrderClient(config *ClientConfig) (*OrderClient, *OrderSubscription, error) {
 	var senders *subscriptionSenders
 	var subscription *OrderSubscription
 	if config.EnableNotify {
 		senders, subscription = initOrderSubscription(config.ChannelCapacity)
 	}
 
-	client, err := newClient(ctx, orderHost, config, senders)
+	client, err := newClient(orderHost, config, senders)
 	if err != nil {
 		return nil, nil, err
 	}
 	return &OrderClient{Client: client}, subscription, nil
 }
 
-func (c *OrderClient) NewOrderSingle(req *message.NewOrderSingle) (*message.ExecutionReport, error) {
+func (c *OrderClient) NewOrderSingle(ctx context.Context, req *message.NewOrderSingle) (*message.ExecutionReport, error) {
 	// 首条匹配 ClOrdID 的 ExecutionReport 是同步 ACK，后续状态变化进入 Subscription。
-	resp, err := c.requestAndWait(req, req.ClOrdID)
+	resp, err := c.requestAndWait(ctx, req, req.ClOrdID)
 	return executionReportResponse(resp, err)
 }
 
-func (c *OrderClient) OrderCancel(req *message.OrderCancelRequest) (*message.ExecutionReport, error) {
-	resp, err := c.requestAndWait(
-		req,
-		req.ClOrdID,
-	)
+func (c *OrderClient) OrderCancel(ctx context.Context, req *message.OrderCancelRequest) (*message.ExecutionReport, error) {
+	resp, err := c.requestAndWait(ctx, req, req.ClOrdID)
 	return executionReportResponse(resp, err)
 }
 
-func (c *OrderClient) OrderMassCancel(req *message.OrderMassCancelRequest) (*message.OrderMassCancelReport, error) {
+func (c *OrderClient) OrderMassCancel(ctx context.Context, req *message.OrderMassCancelRequest) (*message.OrderMassCancelReport, error) {
 	// 这里只等待汇总报告；每个被取消订单的 ExecutionReport 属于账户级订阅消息。
-	resp, err := c.requestAndWait(req, req.ClOrdID)
+	resp, err := c.requestAndWait(ctx, req, req.ClOrdID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,15 +249,15 @@ func (c *OrderClient) OrderMassCancel(req *message.OrderMassCancelRequest) (*mes
 	return result, nil
 }
 
-func (c *OrderClient) OrderReplace(req *message.OrderCancelRequestAndNewOrderSingle) (*message.ExecutionReport, error) {
+func (c *OrderClient) OrderReplace(ctx context.Context, req *message.OrderCancelRequestAndNewOrderSingle) (*message.ExecutionReport, error) {
 	// 新订单 ID 和被取消订单 ID 都可能出现在 ACK 中，因此注册为同一 waiter 的别名。
-	resp, err := c.requestAndWait(req, req.ClOrdID, req.CancelClOrdID)
+	resp, err := c.requestAndWait(ctx, req, req.ClOrdID, req.CancelClOrdID)
 	return executionReportResponse(resp, err)
 }
 
-func (c *OrderClient) ListStatus(req *message.NewOrderList) (*message.ListStatus, error) {
+func (c *OrderClient) ListStatus(ctx context.Context, req *message.NewOrderList) (*message.ListStatus, error) {
 	// ListStatus 是该请求的同步结果，各子订单的 ExecutionReport 通过 Subscription 接收。
-	resp, err := c.requestAndWait(req, req.ClListID)
+	resp, err := c.requestAndWait(ctx, req, req.ClListID)
 	if err != nil {
 		return nil, err
 	}
@@ -271,17 +268,14 @@ func (c *OrderClient) ListStatus(req *message.NewOrderList) (*message.ListStatus
 	return result, nil
 }
 
-func (c *OrderClient) OrderAmendKeepPriority(req *message.OrderAmendKeepPriorityRequest) (*message.ExecutionReport, error) {
+func (c *OrderClient) OrderAmendKeepPriority(ctx context.Context, req *message.OrderAmendKeepPriorityRequest) (*message.ExecutionReport, error) {
 	// 修改结果由 ExecutionReport 确认；若订单属于列表，额外 ListStatus 会进入 Subscription。
-	resp, err := c.requestAndWait(
-		req,
-		req.ClOrdID,
-	)
+	resp, err := c.requestAndWait(ctx, req, req.ClOrdID)
 	return executionReportResponse(resp, err)
 }
 
-func (c *OrderClient) Limit(req *message.LimitQuery) (*message.LimitResponse, error) {
-	resp, err := c.requestAndWait(req, req.ReqID)
+func (c *OrderClient) Limit(ctx context.Context, req *message.LimitQuery) (*message.LimitResponse, error) {
+	resp, err := c.requestAndWait(ctx, req, req.ReqID)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +287,6 @@ func (c *OrderClient) Limit(req *message.LimitQuery) (*message.LimitResponse, er
 }
 
 type Client struct {
-	ctx    context.Context
 	host   string
 	config *ClientConfig
 
@@ -321,8 +314,7 @@ type Client struct {
 	subscription *subscriptionSenders
 }
 
-// newClient 完成 TLS 连接、FIX Logon，并启动消息和心跳两个后台协程。
-func newClient(ctx context.Context, host string, config *ClientConfig, subscription *subscriptionSenders) (*Client, error) {
+func newClient(host string, config *ClientConfig, subscription *subscriptionSenders) (*Client, error) {
 	// ServerName 用于 TLS SNI 和证书主机名校验。
 	conn, err := tls.Dial("tcp", host+":9000", &tls.Config{
 		ServerName: host,
@@ -332,8 +324,7 @@ func newClient(ctx context.Context, host string, config *ClientConfig, subscript
 		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
 
-	c := &Client{
-		ctx:            ctx,
+	return &Client{
 		host:           host,
 		config:         config,
 		conn:           conn,
@@ -344,16 +335,18 @@ func newClient(ctx context.Context, host string, config *ClientConfig, subscript
 		rejectChannels: make(map[uint32]chan responseResult),
 		resubReqs:      make(map[string]message.Request),
 		subscription:   subscription,
-	}
+	}, nil
+}
+
+func (c *Client) Run(ctx context.Context) error {
 	// 后台协程启动前先同步完成 Logon，确保调用方拿到的是可用会话。
-	if err = c.logon(); err != nil {
+	if err := c.logon(); err != nil {
 		_ = c.conn.Close()
-		return nil, fmt.Errorf("failed to logon: %w", err)
+		return fmt.Errorf("failed to logon: %w", err)
 	}
 	go c.handlingMessage(ctx)   // 唯一的网络读取和消息分发协程。
 	go c.handlingHeartbeat(ctx) // 定时心跳以及 TestRequest 响应协程。
-
-	return c, nil
+	return nil
 }
 
 func (c *Client) UtilClosed(ctx context.Context) {
@@ -739,7 +732,7 @@ func (c *Client) request(req message.Request, block bool) error {
 }
 
 // requestAndWait 注册业务 ID，发送请求，并等待一条正常响应或任意错误。
-func (c *Client) requestAndWait(req message.Request, ids ...string) (message.Response, error) {
+func (c *Client) requestAndWait(ctx context.Context, req message.Request, ids ...string) (message.Response, error) {
 	// 单响应 channel 预留一个位置，消息读取协程无需等待调用方消费。
 	ch := make(chan responseResult, 1)
 	// 一个请求可能使用多个等价业务 ID；先去重再绑定到同一个 waiter。
@@ -769,8 +762,8 @@ func (c *Client) requestAndWait(req message.Request, ids ...string) (message.Res
 		return result.response, nil
 	case <-timer.C:
 		return nil, ErrResponseTimeout
-	case <-c.ctx.Done():
-		return nil, c.ctx.Err()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
