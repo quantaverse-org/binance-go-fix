@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,7 +23,34 @@ const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 func main() {
 	ctx := gctx.GetInitCtx()
+	startProfiling(ctx)
 	mainCmd.Run(ctx)
+}
+
+func startProfiling(ctx context.Context) {
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+
+	server := &http.Server{
+		Addr:              "127.0.0.1:6060",
+		ReadHeaderTimeout: 3 * time.Second,
+	}
+
+	go func() {
+		g.Log().Infof(ctx, "pprof listening on http://%s/debug/pprof/", server.Addr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			g.Log().Errorf(ctx, "pprof server: %v", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			g.Log().Errorf(ctx, "shutdown pprof server: %v", err)
+		}
+	}()
 }
 
 var mainCmd = gcmd.Command{
