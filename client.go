@@ -30,7 +30,6 @@ const (
 var (
 	ErrReconnecting    = errors.New("reconnecting, retry later")
 	ErrResponseTimeout = errors.New("response timeout")
-	LogonFailed        = errors.New("logon failed")
 )
 
 // responseResult 将正常响应和 Reject 统一送入同一个请求等待通道。
@@ -712,7 +711,7 @@ func (c *Client) logon() error {
 		return err
 	}
 	if msgTy != message.MsgTypeLogon {
-		return LogonFailed
+		return fmt.Errorf("unexpected message type %s, expected Logon", msgTy)
 	}
 	// 下一条客户端消息从序列号 2 开始。
 	c.id++
