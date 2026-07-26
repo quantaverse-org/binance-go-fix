@@ -64,7 +64,7 @@ var mainCmd = gcmd.Command{
 			return err
 		}
 
-		config := fix.NewClientConfig(apiKey).WithEnableNotify()
+		config := fix.NewClientConfig(apiKey, "EXAMPLE").WithEnableNotify()
 		client, subscription, err := fix.NewMarketClient(config)
 		if err != nil {
 			return fmt.Errorf("connect market data client: %w", err)

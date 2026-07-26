@@ -107,10 +107,10 @@ type ClientConfig struct {
 	ApiKey            *ApiKey
 }
 
-func NewClientConfig(apiKey *ApiKey) *ClientConfig {
+func NewClientConfig(apiKey *ApiKey, clientName string) *ClientConfig {
 	return &ClientConfig{
 		EnableNotify:      false,
-		ClientName:        "CLIENT",
+		ClientName:        clientName,
 		ChannelCapacity:   subscriptionChannelCapacity,
 		HeartbeatInterval: time.Second * 30,
 		ReconnectInterval: time.Second * 1,
@@ -123,11 +123,6 @@ func NewClientConfig(apiKey *ApiKey) *ClientConfig {
 
 func (c *ClientConfig) WithEnableNotify() *ClientConfig {
 	c.EnableNotify = true
-	return c
-}
-
-func (c *ClientConfig) WithClientName(name string) *ClientConfig {
-	c.ClientName = name
 	return c
 }
 

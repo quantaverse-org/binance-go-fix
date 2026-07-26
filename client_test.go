@@ -13,9 +13,8 @@ import (
 func TestClientConfigWithMethods(t *testing.T) {
 	apiKey := &ApiKey{UserName: "api-key"}
 
-	config := NewClientConfig(apiKey).
+	config := NewClientConfig(apiKey, "TEST").
 		WithEnableNotify().
-		WithClientName("TEST").
 		WithHeartbeatInterval(10 * time.Second).
 		WithReconnectInterval(2 * time.Second).
 		WithResponseTimeout(5 * time.Second).
