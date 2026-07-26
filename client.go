@@ -711,7 +711,7 @@ func (c *Client) logon() error {
 		return err
 	}
 	if msgTy != message.MsgTypeLogon {
-		return fmt.Errorf("unexpected message type %s, expected Logon", msgTy)
+		return fmt.Errorf("unexpected message: %s", msg.Display())
 	}
 	// 下一条客户端消息从序列号 2 开始。
 	c.id++
