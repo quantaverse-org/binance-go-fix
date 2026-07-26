@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -153,15 +152,11 @@ func loadAPIKey(ctx context.Context) (*fix.ApiKey, error) {
 	if apiSecretConfig == nil {
 		return nil, errors.New("api_secret is required")
 	}
-	privateKeyFile := strings.TrimSpace(apiSecretConfig.String())
-	if privateKeyFile == "" {
+	privateKeyPEM := strings.TrimSpace(apiSecretConfig.String())
+	if privateKeyPEM == "" {
 		return nil, errors.New("api_secret is required")
 	}
-	privateKeyPEM, err := os.ReadFile(privateKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("read private key: %w", err)
-	}
-	privateKey, err := message.ParseLogonPrivateKeyPEM(privateKeyPEM)
+	privateKey, err := message.ParseLogonPrivateKeyPEM([]byte(privateKeyPEM))
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
