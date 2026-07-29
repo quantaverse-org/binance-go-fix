@@ -21,7 +21,7 @@ func TestEncodeSBELogon(t *testing.T) {
 		30,
 		message.MessageHandlingSequential,
 	).WithResponseMode(message.ResponseModeEverything)
-	sendingTime := time.Date(2026, time.July, 29, 12, 30, 33, 725000000, time.UTC)
+	sendingTime := time.Date(2026, time.July, 29, 12, 30, 33, 725123456, time.UTC)
 
 	frame, err := encodeSBERequest(
 		fixsbe.NewSbeGoMarshaller(),
@@ -67,7 +67,7 @@ func TestEncodeSBELogon(t *testing.T) {
 		"CLIENT",
 		"SPOT",
 		1,
-		message.FormatTimestampMs(sendingTime),
+		"20260729-12:30:33.725123",
 	)
 	if err != nil {
 		t.Fatalf("SignLogonRawData() error = %v", err)

@@ -203,7 +203,7 @@ func adaptSBELogon(
 		senderCompID,
 		targetCompID,
 		seqNum,
-		message.FormatTimestampMs(sendingTime),
+		formatSBESignatureTimestamp(sendingTime),
 	)
 	if err != nil {
 		return nil, err
@@ -227,6 +227,10 @@ func adaptSBELogon(
 		RawData:             rawData,
 		Username:            username,
 	}, nil
+}
+
+func formatSBESignatureTimestamp(value time.Time) string {
+	return value.UTC().Format("20060102-15:04:05.000000")
 }
 
 type encodedSBEOrderFields struct {
