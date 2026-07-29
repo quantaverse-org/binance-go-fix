@@ -67,7 +67,7 @@ func TestNewOrderSingleToMessage(t *testing.T) {
 }
 
 func TestExecutionReportFromMessage(t *testing.T) {
-	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=8|34=2|49=SPOT|52=20240611-09:01:46.228950|56=EXAMPLE|11=order-1|14=1.00000000|17=144|32=0.50000000|37=76|38=5.00000000|39=1|40=2|44=10.00000000|54=1|55=LTCBNB|59=4|60=20240611-09:01:46.228000|150=F|151=4.00000000|636=Y|1057=Y|25001=1|25017=5.00000000|25018=1718096506228|25023=20240611-09:01:46.228000|25032=Y|136=2|137=0.001|138=BNB|139=4|137=0.002|138=USDT|139=4|10=000|"))
+	message, err := ParseMessage(withSOH("8=FIX.4.4|9=1|35=8|34=2|49=SPOT|52=20240611-09:01:46.228950|56=EXAMPLE|11=order-1|14=1.00000000|17=144|32=0.50000000|37=76|38=5.00000000|39=1|40=2|44=10.00000000|54=1|55=LTCBNB|59=4|60=20240611-09:01:46.228000|150=F|151=4.00000000|198=77|528=A|636=Y|103=99|1057=Y|25001=1|25017=5.00000000|25018=1718096506228|25019=BTCUSDT|25020=88|25023=20240611-09:01:46.228000|25032=Y|136=2|137=0.001|138=BNB|139=4|137=0.002|138=USDT|139=4|10=000|"))
 	if err != nil {
 		t.Fatalf("ParseMessage() error = %v", err)
 	}
@@ -118,6 +118,21 @@ func TestExecutionReportFromMessage(t *testing.T) {
 	}
 	if report.OrdStatus != OrdStatusPartiallyFilled {
 		t.Fatalf("OrdStatus = %q, want %q", report.OrdStatus, OrdStatusPartiallyFilled)
+	}
+	if report.SecondaryOrderID != 77 || report.SecondaryExternalAccountID != 88 || report.SecondarySymbol != "BTCUSDT" {
+		t.Fatalf(
+			"secondary fields = (%d, %d, %q), want (77, 88, %q)",
+			report.SecondaryOrderID,
+			report.SecondaryExternalAccountID,
+			report.SecondarySymbol,
+			"BTCUSDT",
+		)
+	}
+	if report.OrderCapacity != OrderCapacityAgency {
+		t.Fatalf("OrderCapacity = %q, want %q", report.OrderCapacity, OrderCapacityAgency)
+	}
+	if report.OrdRejReason != OrdRejReasonOther {
+		t.Fatalf("OrdRejReason = %q, want %q", report.OrdRejReason, OrdRejReasonOther)
 	}
 	if !boolPointerEqual(report.WorkingIndicator, true) {
 		t.Fatalf("WorkingIndicator = %v, want true", report.WorkingIndicator)

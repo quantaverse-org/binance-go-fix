@@ -29,6 +29,9 @@ const (
 	TagMessageHandling     Tag = 25035
 	TagResponseMode        Tag = 25036
 	TagUUID                Tag = 25037
+	TagSbeSchemaID         Tag = 25050
+	TagSbeSchemaVersion    Tag = 25051
+	TagSbeSchemaDeprecated Tag = 25052
 )
 
 type EncryptMethod string
@@ -179,14 +182,16 @@ func (r *Reject) Error() string {
 }
 
 type LogonRequest struct {
-	EncryptMethod   EncryptMethod
-	HeartBtInt      int64
-	PrivateKey      ed25519.PrivateKey
-	ResetSeqNumFlag bool
-	Username        string
-	MessageHandling MessageHandling
-	ResponseMode    *ResponseMode
-	DropCopyFlag    *bool
+	EncryptMethod    EncryptMethod
+	HeartBtInt       int64
+	PrivateKey       ed25519.PrivateKey
+	ResetSeqNumFlag  bool
+	Username         string
+	MessageHandling  MessageHandling
+	ResponseMode     *ResponseMode
+	DropCopyFlag     *bool
+	SbeSchemaID      *uint16
+	SbeSchemaVersion *uint16
 }
 
 func NewLogonRequest(username string, privateKey ed25519.PrivateKey, heartBtInt int64, messageHandling MessageHandling) *LogonRequest {
@@ -207,6 +212,12 @@ func (r *LogonRequest) WithResponseMode(responseMode ResponseMode) *LogonRequest
 
 func (r *LogonRequest) WithDropCopyFlag(dropCopyFlag bool) *LogonRequest {
 	r.DropCopyFlag = &dropCopyFlag
+	return r
+}
+
+func (r *LogonRequest) WithSbeSchema(id, version uint16) *LogonRequest {
+	r.SbeSchemaID = &id
+	r.SbeSchemaVersion = &version
 	return r
 }
 
@@ -232,6 +243,12 @@ func (r *LogonRequest) ToMessage(senderCompID string, targetCompID string, seqNu
 	}
 	if r.DropCopyFlag != nil {
 		builder.SetField(TagDropCopyFlag, FormatBool(*r.DropCopyFlag))
+	}
+	if r.SbeSchemaID != nil {
+		builder.SetField(TagSbeSchemaID, FormatUint(uint64(*r.SbeSchemaID)))
+	}
+	if r.SbeSchemaVersion != nil {
+		builder.SetField(TagSbeSchemaVersion, FormatUint(uint64(*r.SbeSchemaVersion)))
 	}
 	return builder.Build()
 }
@@ -274,9 +291,10 @@ func ParseLogonPrivateKeyPEM(data []byte) (ed25519.PrivateKey, error) {
 }
 
 type LogonResponse struct {
-	EncryptMethod EncryptMethod
-	HeartBtInt    int64
-	UUID          string
+	EncryptMethod                EncryptMethod
+	HeartBtInt                   int64
+	UUID                         string
+	SbeSchemaIdVersionDeprecated bool
 }
 
 func NewLogonResponse(encryptMethod EncryptMethod, heartBtInt int64, uuid string) *LogonResponse {

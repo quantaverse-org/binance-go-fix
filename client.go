@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/quantaverse-org/binance-go-fix/internal/fixsbe"
 	"github.com/quantaverse-org/binance-go-fix/message"
 
 	"github.com/gogf/gf/v2/frame/g"
@@ -43,6 +44,17 @@ type responseResult struct {
 type responseWaiter struct {
 	ch  chan responseResult // 接收正常响应或 Reject。
 	ids []string            // 注册到 respChannels 的全部业务 ID，用于统一清理别名。
+}
+
+type sbeMarketRoute struct {
+	symbol     string
+	templateID uint16
+}
+
+type sbeBookLevel struct {
+	symbol    string
+	entryType message.MDEntryType
+	price     float64
 }
 
 // MarketSubscription 暴露市场数据服务器的推送消息。
@@ -95,6 +107,15 @@ type ApiKey struct {
 	PrivateKey ed25519.PrivateKey
 }
 
+type EncodingMode uint8
+
+const (
+	// EncodingModeFIX uses text FIX requests and responses on port 9000.
+	EncodingModeFIX EncodingMode = iota
+	// EncodingModeFIXRequestSBEResponse uses text FIX requests and SBE responses on port 9001.
+	EncodingModeFIXRequestSBEResponse
+)
+
 type ClientConfig struct {
 	EnableNotify      bool
 	ClientName        string
@@ -104,6 +125,7 @@ type ClientConfig struct {
 	ResponseTimeout   time.Duration
 	WriteTimeout      time.Duration
 	ResponseMode      message.ResponseMode
+	EncodingMode      EncodingMode
 	ApiKey            *ApiKey
 }
 
@@ -117,6 +139,7 @@ func NewClientConfig(apiKey *ApiKey, clientName string) *ClientConfig {
 		ResponseTimeout:   time.Second * 10,
 		WriteTimeout:      time.Second * 1,
 		ResponseMode:      message.ResponseModeEverything,
+		EncodingMode:      EncodingModeFIX,
 		ApiKey:            apiKey,
 	}
 }
@@ -148,6 +171,11 @@ func (c *ClientConfig) WithWriteTimeout(timeout time.Duration) *ClientConfig {
 
 func (c *ClientConfig) WithResponseMode(responseMode message.ResponseMode) *ClientConfig {
 	c.ResponseMode = responseMode
+	return c
+}
+
+func (c *ClientConfig) WithEncodingMode(mode EncodingMode) *ClientConfig {
+	c.EncodingMode = mode
 	return c
 }
 
@@ -186,13 +214,22 @@ func (c *MarketClient) MarketData(ctx context.Context, req *message.MarketDataRe
 	// 取消订阅没有成功响应，消息写入连接后即可返回。
 	if req.SubscriptionRequestType == message.SubscriptionRequestTypeUnsubscribe {
 		c.removeResubRequest(req.MDReqID)
+		c.removeSBEMarketRoutes(req.MDReqID)
 		return c.request(req, false)
+	}
+
+	// SBE 行情响应不携带 MDReqID，必须在请求写入前登记 symbol/template 路由。
+	if c.config.EncodingMode == EncodingModeFIXRequestSBEResponse {
+		if err := c.registerSBEMarketRoutes(req); err != nil {
+			return err
+		}
 	}
 
 	// 第一条 Snapshot 或 IncrementalRefresh 表示订阅成功，Reject 表示订阅失败。
 	_, err := c.requestAndWait(ctx, req, req.MDReqID)
 	if err != nil {
 		c.removeResubRequest(req.MDReqID)
+		c.removeSBEMarketRoutes(req.MDReqID)
 		return err
 	}
 	// 确认订阅成功后保存请求副本，重连完成时用于恢复订阅。
@@ -285,12 +322,13 @@ type Client struct {
 	config *ClientConfig
 
 	// connLk 串行化写入、重连和序列号递增，reader 只由消息处理协程使用。
-	connLk    sync.Mutex
-	conn      *tls.Conn
-	reader    *bufio.Reader
-	id        uint32
-	closed    chan struct{}
-	hbChannel chan *message.TestRequest
+	connLk        sync.Mutex
+	conn          *tls.Conn
+	reader        *bufio.Reader
+	sbeMarshaller *fixsbe.SbeGoMarshaller
+	id            uint32
+	closed        chan struct{}
+	hbChannel     chan *message.TestRequest
 
 	// respChannels 用业务 ID 将应用层响应路由给正在等待的请求。
 	respChanLk   sync.Mutex
@@ -304,13 +342,22 @@ type Client struct {
 	resubReqLk sync.Mutex
 	resubReqs  map[string]message.Request
 
+	// SBE 行情省略 MDReqID，使用订阅时登记的 symbol/template 找回原请求。
+	sbeMarketLk     sync.Mutex
+	sbeMarketRoutes map[sbeMarketRoute]string
+	sbeBookLevels   map[string]map[sbeBookLevel]struct{}
+
 	// subscription 为 nil 时忽略所有未匹配请求的主动推送。
 	subscription *subscriptionSenders
 }
 
 func newClient(host string, config *ClientConfig, subscription *subscriptionSenders) (*Client, error) {
+	address, err := clientAddress(host, config.EncodingMode)
+	if err != nil {
+		return nil, err
+	}
 	// ServerName 用于 TLS SNI 和证书主机名校验。
-	conn, err := tls.Dial("tcp", host+":9000", &tls.Config{
+	conn, err := tls.Dial("tcp", address, &tls.Config{
 		ServerName: host,
 		MinVersion: tls.VersionTLS12,
 	})
@@ -319,17 +366,31 @@ func newClient(host string, config *ClientConfig, subscription *subscriptionSend
 	}
 
 	return &Client{
-		host:           host,
-		config:         config,
-		conn:           conn,
-		reader:         bufio.NewReader(conn),
-		closed:         make(chan struct{}),
-		hbChannel:      make(chan *message.TestRequest, 1),
-		respChannels:   make(map[string]*responseWaiter),
-		rejectChannels: make(map[uint32]chan responseResult),
-		resubReqs:      make(map[string]message.Request),
-		subscription:   subscription,
+		host:            host,
+		config:          config,
+		conn:            conn,
+		reader:          bufio.NewReader(conn),
+		sbeMarshaller:   fixsbe.NewSbeGoMarshaller(),
+		closed:          make(chan struct{}),
+		hbChannel:       make(chan *message.TestRequest, 1),
+		respChannels:    make(map[string]*responseWaiter),
+		rejectChannels:  make(map[uint32]chan responseResult),
+		resubReqs:       make(map[string]message.Request),
+		sbeMarketRoutes: make(map[sbeMarketRoute]string),
+		sbeBookLevels:   make(map[string]map[sbeBookLevel]struct{}),
+		subscription:    subscription,
 	}, nil
+}
+
+func clientAddress(host string, mode EncodingMode) (string, error) {
+	switch mode {
+	case EncodingModeFIX:
+		return host + ":9000", nil
+	case EncodingModeFIXRequestSBEResponse:
+		return host + ":9001", nil
+	default:
+		return "", fmt.Errorf("unsupported encoding mode: %d", mode)
+	}
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -356,8 +417,8 @@ func (c *Client) handlingMessage(ctx context.Context) {
 
 	readTimeout := 0
 	for {
-		// readMessage 使用 HeartbeatInterval 作为读超时，用于发现静默连接。
-		msg, err := c.readMessage()
+		// readIncomingMessage 根据连接模式读取文本 FIX 或一个完整 SBE frame。
+		inbound, err := c.readIncomingMessage()
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				g.Log().Warningf(ctx, "BinanceFixClient %s: read message timeout", c.config.ClientName)
@@ -382,14 +443,24 @@ func (c *Client) handlingMessage(ctx context.Context) {
 			} else {
 				readTimeout = 0
 				g.Log().Warningf(ctx, "BinanceFixClient %s: read message error: %v", c.config.ClientName, err)
+				// SBE 的 SOFH 提供 frame 边界；读取或解码失败后无法保证 reader
+				// 仍对齐下一条 frame，因此重新建立会话并恢复行情订阅。
+				if c.config.EncodingMode == EncodingModeFIXRequestSBEResponse {
+					if c.reconnecting(ctx) {
+						return
+					}
+					if c.resubscribing(ctx) {
+						return
+					}
+				}
 			}
 			continue
 		} else {
 			readTimeout = 0
 		}
 
-		// dispatchMessage 返回 reconnect=true 表示服务器要求结束当前会话。
-		reconnect, err := c.dispatchMessage(ctx, msg)
+		// dispatchInboundMessage 返回 reconnect=true 表示服务器要求结束当前会话。
+		reconnect, err := c.dispatchInboundMessage(ctx, inbound)
 		if err != nil {
 			g.Log().Errorf(ctx, "BinanceFixClient %s: dispatch message error: %v", c.config.ClientName, err)
 			continue
@@ -447,7 +518,11 @@ func (c *Client) reconnecting(ctx context.Context) bool {
 func (c *Client) reconnect(ctx context.Context) error {
 	g.Log().Infof(ctx, "BinanceFixClient %s: try reconnecting...", c.config.ClientName)
 
-	conn, err := tls.Dial("tcp", c.host+":9000", &tls.Config{
+	address, err := clientAddress(c.host, c.config.EncodingMode)
+	if err != nil {
+		return err
+	}
+	conn, err := tls.Dial("tcp", address, &tls.Config{
 		ServerName: c.host,
 		MinVersion: tls.VersionTLS12,
 	})
@@ -462,6 +537,7 @@ func (c *Client) reconnect(ctx context.Context) error {
 		_ = c.conn.Close()
 		return err
 	}
+	c.clearSBEBookLevels()
 
 	g.Log().Infof(ctx, "BinanceFixClient %s: reconnected successfully", c.config.ClientName)
 	return nil
@@ -495,137 +571,161 @@ func (c *Client) resubscribing(ctx context.Context) bool {
 	return false
 }
 
-// dispatchMessage 解析消息类型，并将消息路由到心跳、请求 waiter 或 Subscription。
-// 返回 true 表示当前 FIX 会话应重连。
+// dispatchMessage 保留文本 FIX 的测试和内部入口，实际路由与 SBE 共用 dispatchInboundMessage。
 func (c *Client) dispatchMessage(ctx context.Context, msg *message.Message) (bool, error) {
+	inbound, err := decodeFIXInboundMessage(msg)
+	if err != nil {
+		return false, err
+	}
+	return c.dispatchInboundMessage(ctx, inbound)
+}
+
+func decodeFIXInboundMessage(msg *message.Message) (*inboundMessage, error) {
 	msgType, err := msg.MsgType()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	now := time.Now()
 	sendingTime, err := msg.SendingTime()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	// TODO: use metrics instead of log
-	g.Log().Debugf(ctx, "BinanceFixClient %s: received message type %s, latency %v", c.config.ClientName, msgType, now.Sub(sendingTime))
 
+	var response message.Response
 	switch msgType {
 	case message.MsgTypeHeartbeat:
-		g.Log().Debugf(ctx, "BinanceFixClient %s: received heartbeat", c.config.ClientName)
+		response = new(message.Heartbeat)
 	case message.MsgTypeTestRequest:
-		// TestRequest 交给心跳协程回复，避免消息读取协程直接执行网络写入。
-		resp := new(message.TestRequest)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
+		response = new(message.TestRequest)
+	case message.MsgTypeReject:
+		response = new(message.Reject)
+	case message.MsgTypeLogout:
+		response = new(message.Logout)
+	case message.MsgTypeNews:
+		response = new(message.News)
+	case message.MsgTypeLogon:
+		response = new(message.LogonResponse)
+	case message.MsgTypeLimitResponse:
+		response = new(message.LimitResponse)
+	case message.MsgTypeInstrumentList:
+		response = new(message.InstrumentList)
+	case message.MsgTypeMarketDataSnapshot:
+		response = new(message.MarketDataSnapshot)
+	case message.MsgTypeMarketDataRequestReject:
+		response = new(message.MarketDataRequestReject)
+	case message.MsgTypeMarketDataIncrementalRefresh:
+		response = new(message.MarketDataIncrementalRefresh)
+	case message.MsgTypeExecutionReport:
+		response = new(message.ExecutionReport)
+	case message.MsgTypeOrderCancelReject:
+		response = new(message.OrderCancelReject)
+	case message.MsgTypeOrderMassCancelReport:
+		response = new(message.OrderMassCancelReport)
+	case message.MsgTypeOrderAmendReject:
+		response = new(message.OrderAmendReject)
+	case message.MsgTypeListStatus:
+		response = new(message.ListStatus)
+	default:
+		return nil, fmt.Errorf("unexpected message type %s", msgType)
+	}
+
+	if err := response.FromMessage(msg); err != nil {
+		return nil, err
+	}
+	inbound := &inboundMessage{
+		msgType:     msgType,
+		sendingTime: sendingTime,
+		response:    response,
+	}
+	if seqNumValue, ok := msg.GetField(message.TagMsgSeqNum); ok {
+		seqNum, err := message.ParseUint(seqNumValue)
+		if err != nil {
+			return nil, err
 		}
+		inbound.seqNum = uint32(seqNum)
+	}
+	return inbound, nil
+}
+
+// dispatchInboundMessage routes an already decoded response to heartbeat,
+// synchronous request waiters, or the appropriate Subscription.
+func (c *Client) dispatchInboundMessage(ctx context.Context, inbound *inboundMessage) (bool, error) {
+	// TODO: use metrics instead of log
+	g.Log().Debugf(ctx, "BinanceFixClient %s: received message type %s, latency %v",
+		c.config.ClientName, inbound.msgType, time.Since(inbound.sendingTime))
+
+	switch resp := inbound.response.(type) {
+	case *message.Heartbeat:
+		g.Log().Debugf(ctx, "BinanceFixClient %s: received heartbeat", c.config.ClientName)
+	case *message.TestRequest:
+		// TestRequest 交给心跳协程回复，避免消息读取协程直接执行网络写入。
 		select {
 		case <-ctx.Done():
 		case c.hbChannel <- resp:
 		default:
 		}
-	case message.MsgTypeReject:
+	case *message.Reject:
 		// 会话级 Reject 使用 RefSeqNum 对应原始请求的 MsgSeqNum。
-		resp := new(message.Reject)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
 		if resp.RefSeqNum != nil {
 			c.deliverRejectError(*resp.RefSeqNum, resp)
 		}
-	case message.MsgTypeLogout:
+	case *message.Logout, *message.News:
 		// 服务端 Logout 或 News 都表示当前会话不可继续使用。
 		return true, nil
-	case message.MsgTypeNews:
-		return true, nil
-	case message.MsgTypeLimitResponse:
-		// 普通查询响应只投递给对应 waiter，不属于服务器主动推送。
-		resp := new(message.LimitResponse)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
+	case *message.LogonResponse:
+		return false, fmt.Errorf("unexpected logon response after session establishment")
+	case *message.LimitResponse:
 		c.deliverResponse(resp.ReqID, resp)
-	case message.MsgTypeInstrumentList:
-		resp := new(message.InstrumentList)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
+	case *message.InstrumentList:
 		c.deliverResponse(resp.InstrumentReqID, resp)
-	case message.MsgTypeMarketDataSnapshot:
+	case *message.MarketDataSnapshot:
+		if err := c.resolveSBEMarketData(inbound, resp); err != nil {
+			return false, err
+		}
 		// 第一条行情完成订阅 waiter；行情本身始终保留在 Subscription 中供调用方消费。
-		resp := new(message.MarketDataSnapshot)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
 		c.deliverResponse(resp.MDReqID, resp)
 		if c.subscription != nil {
 			sendSubscription[message.Response](ctx, c.subscription.marketData, resp)
 		}
-	case message.MsgTypeMarketDataRequestReject:
+	case *message.MarketDataRequestReject:
 		// 订阅被拒绝后不能继续参与重订阅，并立即终止该请求的 waiter。
-		resp := new(message.MarketDataRequestReject)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
 		c.removeResubRequest(resp.MDReqID)
+		c.removeSBEMarketRoutes(resp.MDReqID)
 		c.deliverResponseError(resp.MDReqID, resp)
-	case message.MsgTypeMarketDataIncrementalRefresh:
-		// Trade 订阅以第一条增量行情确认成功，后续增量行情只进入 Subscription。
-		resp := new(message.MarketDataIncrementalRefresh)
-		if err = resp.FromMessage(msg); err != nil {
+	case *message.MarketDataIncrementalRefresh:
+		if err := c.resolveSBEMarketData(inbound, resp); err != nil {
 			return false, err
 		}
+		// Trade 订阅以第一条增量行情确认成功，后续增量行情只进入 Subscription。
 		c.deliverResponse(resp.MDReqID, resp)
 		if c.subscription != nil {
 			sendSubscription[message.Response](ctx, c.subscription.marketData, resp)
 		}
-	case message.MsgTypeExecutionReport:
+	case *message.ExecutionReport:
 		// Rejected 是请求错误；正常报告优先作为 ACK，未匹配 waiter 时作为账户级推送。
-		resp := new(message.ExecutionReport)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
 		if resp.ExecType == message.ExecTypeRejected {
 			c.deliverResponseError(resp.ClOrdID, resp)
 		} else if !c.deliverResponse(resp.ClOrdID, resp) && c.subscription != nil {
 			sendSubscription(ctx, c.subscription.orderExecution, resp)
 		}
-	case message.MsgTypeOrderCancelReject:
-		resp := new(message.OrderCancelReject)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
+	case *message.OrderCancelReject:
 		c.deliverResponseError(resp.ClOrdID, resp)
-	case message.MsgTypeOrderMassCancelReport:
-		// MassCancelResponse 决定报告应作为成功响应还是请求错误返回。
-		resp := new(message.OrderMassCancelReport)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
+	case *message.OrderMassCancelReport:
 		if resp.MassCancelResponse == message.MassCancelResponseCancelRequestRejected {
 			c.deliverResponseError(resp.ClOrdID, resp)
 		} else {
 			c.deliverResponse(resp.ClOrdID, resp)
 		}
-	case message.MsgTypeOrderAmendReject:
-		resp := new(message.OrderAmendReject)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
+	case *message.OrderAmendReject:
 		c.deliverResponseError(resp.ClOrdID, resp)
-	case message.MsgTypeListStatus:
+	case *message.ListStatus:
 		// ListStatus 与 ExecutionReport 一样，既可能是请求响应，也可能是账户级主动推送。
-		resp := new(message.ListStatus)
-		if err = resp.FromMessage(msg); err != nil {
-			return false, err
-		}
 		if resp.ListOrderStatus == message.ListOrderStatusReject {
 			c.deliverResponseError(resp.ClListID, resp)
 		} else if !c.deliverResponse(resp.ClListID, resp) && c.subscription != nil {
 			sendSubscription(ctx, c.subscription.orderListStatus, resp)
 		}
 	default:
-		return false, fmt.Errorf("unexpected message type %s", msgType)
+		return false, fmt.Errorf("unexpected response type %T", inbound.response)
 	}
 
 	return false, nil
@@ -685,6 +785,9 @@ func (c *Client) logon() error {
 	if c.host == orderHost {
 		req.WithResponseMode(c.config.ResponseMode)
 	}
+	if c.config.EncodingMode == EncodingModeFIXRequestSBEResponse {
+		req.WithSbeSchema(sbeSchemaID, sbeSchemaVersion)
+	}
 
 	// 每个新 FIX 会话的本地发送序列号从 1 开始，Logon 占用第一号。
 	c.id = 1
@@ -697,16 +800,21 @@ func (c *Client) logon() error {
 	}
 
 	// 后台读取协程尚未启动，因此由当前协程同步读取 Logon 响应。
-	msg, err = c.readMessage()
+	inbound, err := c.readIncomingMessage()
 	if err != nil {
 		return err
 	}
-	msgTy, err := msg.MsgType()
-	if err != nil {
-		return err
+	if inbound.msgType == message.MsgTypeReject {
+		if reject, ok := inbound.response.(*message.Reject); ok {
+			return reject
+		}
 	}
-	if msgTy != message.MsgTypeLogon {
-		return fmt.Errorf("unexpected message: %s", msg.Display())
+	if inbound.msgType != message.MsgTypeLogon {
+		return fmt.Errorf("unexpected logon response type: %s", inbound.msgType)
+	}
+	if response, ok := inbound.response.(*message.LogonResponse); ok && response.SbeSchemaIdVersionDeprecated {
+		g.Log().Warningf(context.Background(), "BinanceFixClient %s: FIX SBE schema %d:%d is deprecated",
+			c.config.ClientName, sbeSchemaID, sbeSchemaVersion)
 	}
 	// 下一条客户端消息从序列号 2 开始。
 	c.id++
@@ -941,6 +1049,158 @@ func (c *Client) resubRequests() []message.Request {
 	return reqs
 }
 
+func (c *Client) registerSBEMarketRoutes(req *message.MarketDataRequest) error {
+	templates := sbeMarketTemplates(req)
+	routes := make([]sbeMarketRoute, 0, len(req.Symbols)*len(templates))
+	for _, symbol := range req.Symbols {
+		for _, templateID := range templates {
+			routes = append(routes, sbeMarketRoute{symbol: symbol, templateID: templateID})
+		}
+	}
+
+	c.sbeMarketLk.Lock()
+	defer c.sbeMarketLk.Unlock()
+	if c.sbeMarketRoutes == nil {
+		c.sbeMarketRoutes = make(map[sbeMarketRoute]string)
+	}
+	if c.sbeBookLevels == nil {
+		c.sbeBookLevels = make(map[string]map[sbeBookLevel]struct{})
+	}
+	for _, route := range routes {
+		if existingID, ok := c.sbeMarketRoutes[route]; ok && existingID != req.MDReqID {
+			return fmt.Errorf("SBE market route already registered: symbol=%s template=%d", route.symbol, route.templateID)
+		}
+	}
+	for _, route := range routes {
+		c.sbeMarketRoutes[route] = req.MDReqID
+	}
+	return nil
+}
+
+func sbeMarketTemplates(req *message.MarketDataRequest) []uint16 {
+	var hasBook, hasTrade bool
+	for _, entryType := range req.MDEntryTypes {
+		switch entryType {
+		case message.MDEntryTypeBid, message.MDEntryTypeOffer:
+			hasBook = true
+		case message.MDEntryTypeTrade:
+			hasTrade = true
+		}
+	}
+
+	templates := make([]uint16, 0, 3)
+	if hasBook {
+		templates = append(templates, sbeTemplateMarketDataSnapshot)
+		if req.MarketDepth == 1 {
+			templates = append(templates, sbeTemplateMarketDataIncrementalBookTicker)
+		} else {
+			templates = append(templates, sbeTemplateMarketDataIncrementalDepth)
+		}
+	}
+	if hasTrade {
+		templates = append(templates, sbeTemplateMarketDataIncrementalTrade)
+	}
+	return templates
+}
+
+func (c *Client) removeSBEMarketRoutes(id string) {
+	if id == "" {
+		return
+	}
+	c.sbeMarketLk.Lock()
+	defer c.sbeMarketLk.Unlock()
+	for route, routeID := range c.sbeMarketRoutes {
+		if routeID == id {
+			delete(c.sbeMarketRoutes, route)
+		}
+	}
+	delete(c.sbeBookLevels, id)
+}
+
+func (c *Client) clearSBEBookLevels() {
+	c.sbeMarketLk.Lock()
+	c.sbeBookLevels = make(map[string]map[sbeBookLevel]struct{})
+	c.sbeMarketLk.Unlock()
+}
+
+// resolveSBEMarketData restores the MDReqID omitted from SBE market responses.
+// It also derives NEW/CHANGE/DELETE using the locally tracked price levels.
+func (c *Client) resolveSBEMarketData(inbound *inboundMessage, response message.Response) error {
+	if inbound.templateID == 0 {
+		return nil
+	}
+
+	symbol := inbound.marketSymbol
+	switch resp := response.(type) {
+	case *message.MarketDataSnapshot:
+		if symbol == "" {
+			symbol = resp.Symbol
+		}
+	case *message.MarketDataIncrementalRefresh:
+		if symbol == "" && len(resp.Entries) > 0 {
+			symbol = resp.Entries[0].Symbol
+		}
+	default:
+		return nil
+	}
+	if symbol == "" {
+		return fmt.Errorf("SBE market response template %d is missing Symbol", inbound.templateID)
+	}
+
+	c.sbeMarketLk.Lock()
+	defer c.sbeMarketLk.Unlock()
+	id, ok := c.sbeMarketRoutes[sbeMarketRoute{symbol: symbol, templateID: inbound.templateID}]
+	if !ok {
+		return fmt.Errorf("no SBE market route for symbol=%s template=%d", symbol, inbound.templateID)
+	}
+
+	switch resp := response.(type) {
+	case *message.MarketDataSnapshot:
+		resp.MDReqID = id
+		resp.SendingTime = inbound.sendingTime
+		levels := c.sbeBookLevels[id]
+		if levels == nil {
+			levels = make(map[sbeBookLevel]struct{}, len(resp.Entries))
+			c.sbeBookLevels[id] = levels
+		}
+		// 一个 MDReqID 可以包含多个交易对；新快照只替换当前 Symbol 的档位。
+		for level := range levels {
+			if level.symbol == symbol {
+				delete(levels, level)
+			}
+		}
+		for _, entry := range resp.Entries {
+			levels[sbeBookLevel{symbol: symbol, entryType: entry.MDEntryType, price: entry.MDEntryPx}] = struct{}{}
+		}
+	case *message.MarketDataIncrementalRefresh:
+		resp.MDReqID = id
+		resp.SendingTime = inbound.sendingTime
+		if inbound.templateID == sbeTemplateMarketDataIncrementalTrade {
+			return nil
+		}
+		levels := c.sbeBookLevels[id]
+		if levels == nil {
+			levels = make(map[sbeBookLevel]struct{})
+			c.sbeBookLevels[id] = levels
+		}
+		for i := range resp.Entries {
+			entry := &resp.Entries[i]
+			level := sbeBookLevel{symbol: symbol, entryType: entry.MDEntryType, price: entry.MDEntryPx}
+			if entry.MDUpdateAction == message.MDUpdateActionDelete {
+				delete(levels, level)
+				continue
+			}
+			if _, exists := levels[level]; exists {
+				entry.MDUpdateAction = message.MDUpdateActionChange
+			} else {
+				entry.MDUpdateAction = message.MDUpdateActionNew
+				levels[level] = struct{}{}
+			}
+		}
+	}
+	return nil
+}
+
 // cloneMarketDataRequest 深拷贝请求中的 slice 和指针字段，隔离调用方后续修改。
 func cloneMarketDataRequest(req *message.MarketDataRequest) *message.MarketDataRequest {
 	if req == nil {
@@ -980,6 +1240,24 @@ func (c *Client) writeMessage(msg *message.Message) error {
 		return err
 	}
 	return nil
+}
+
+func (c *Client) readIncomingMessage() (*inboundMessage, error) {
+	if c.config.EncodingMode == EncodingModeFIXRequestSBEResponse {
+		if err := c.conn.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval)); err != nil {
+			return nil, fmt.Errorf("failed to set read deadline: %w", err)
+		}
+		if c.sbeMarshaller == nil {
+			c.sbeMarshaller = fixsbe.NewSbeGoMarshaller()
+		}
+		return readSBEMessage(c.reader, c.sbeMarshaller)
+	}
+
+	msg, err := c.readMessage()
+	if err != nil {
+		return nil, err
+	}
+	return decodeFIXInboundMessage(msg)
 }
 
 // readMessage 先读取 FIX 头部，再根据 BodyLength 精确读取消息体和 CheckSum。

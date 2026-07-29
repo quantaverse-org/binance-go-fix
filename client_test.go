@@ -19,7 +19,8 @@ func TestClientConfigWithMethods(t *testing.T) {
 		WithReconnectInterval(2 * time.Second).
 		WithResponseTimeout(5 * time.Second).
 		WithWriteTimeout(3 * time.Second).
-		WithResponseMode(message.ResponseModeOnlyAcks)
+		WithResponseMode(message.ResponseModeOnlyAcks).
+		WithEncodingMode(EncodingModeFIXRequestSBEResponse)
 
 	if !config.EnableNotify {
 		t.Fatal("EnableNotify = false, want true")
@@ -42,8 +43,30 @@ func TestClientConfigWithMethods(t *testing.T) {
 	if config.ResponseMode != message.ResponseModeOnlyAcks {
 		t.Fatalf("ResponseMode = %v, want %s", config.ResponseMode, message.ResponseModeOnlyAcks)
 	}
+	if config.EncodingMode != EncodingModeFIXRequestSBEResponse {
+		t.Fatalf("EncodingMode = %v, want %v", config.EncodingMode, EncodingModeFIXRequestSBEResponse)
+	}
 	if config.ApiKey != apiKey {
 		t.Fatal("ApiKey was changed")
+	}
+}
+
+func TestClientAddress(t *testing.T) {
+	tests := []struct {
+		mode EncodingMode
+		want string
+	}{
+		{mode: EncodingModeFIX, want: "fix-md.binance.com:9000"},
+		{mode: EncodingModeFIXRequestSBEResponse, want: "fix-md.binance.com:9001"},
+	}
+	for _, test := range tests {
+		got, err := clientAddress(marketHost, test.mode)
+		if err != nil {
+			t.Fatalf("clientAddress(%d) error = %v", test.mode, err)
+		}
+		if got != test.want {
+			t.Fatalf("clientAddress(%d) = %q, want %q", test.mode, got, test.want)
+		}
 	}
 }
 

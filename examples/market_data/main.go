@@ -94,7 +94,9 @@ var mainCmd = gcmd.Command{
 			return err
 		}
 
-		config := fix.NewClientConfig(apiKey, "EXAMPLE").WithEnableNotify()
+		config := fix.NewClientConfig(apiKey, "EXAMPLE").
+			WithEnableNotify().
+			WithEncodingMode(fix.EncodingModeFIXRequestSBEResponse)
 		client, subscription, err := fix.NewMarketClient(config)
 		if err != nil {
 			return fmt.Errorf("connect market data client: %w", err)
@@ -157,8 +159,12 @@ var mainCmd = gcmd.Command{
 				case *message.MarketDataSnapshot:
 					g.Log().Infof(ctx, "snapshot latency=%s", now.Sub(update.SendingTime))
 				case *message.MarketDataIncrementalRefresh:
-					for _, entry := range update.Entries {
-						g.Log().Infof(ctx, "incremental latency=%s", now.Sub(entry.TransactTime))
+					if stream == "trade" {
+						for _, entry := range update.Entries {
+							g.Log().Infof(ctx, "incremental latency=%s", now.Sub(entry.TransactTime))
+						}
+					} else {
+						g.Log().Infof(ctx, "incremental latency=%s", now.Sub(update.SendingTime))
 					}
 				}
 			}

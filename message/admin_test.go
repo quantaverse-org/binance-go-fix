@@ -15,6 +15,7 @@ func TestLogonRequestToMessage(t *testing.T) {
 	message, err := NewLogonRequest("api-key", privateKey, 30, MessageHandlingSequential).
 		WithResponseMode(ResponseModeOnlyAcks).
 		WithDropCopyFlag(true).
+		WithSbeSchema(1, 1).
 		ToMessage("EXAMPLE", "SPOT", 1, exampleSendingTime())
 	if err != nil {
 		t.Fatalf("ToMessage() error = %v", err)
@@ -34,6 +35,8 @@ func TestLogonRequestToMessage(t *testing.T) {
 	assertField(t, message, TagMessageHandling, "2")
 	assertField(t, message, TagResponseMode, "2")
 	assertField(t, message, TagDropCopyFlag, "Y")
+	assertField(t, message, TagSbeSchemaID, "1")
+	assertField(t, message, TagSbeSchemaVersion, "1")
 }
 
 func TestSignLogonRawData(t *testing.T) {

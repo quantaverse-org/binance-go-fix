@@ -1,6 +1,8 @@
 # Market Data Example
 
-This example connects to the Binance Spot FIX market-data endpoint and subscribes to either the incremental order book or trade stream.
+This example sends FIX requests to the Binance Spot FIX market-data endpoint,
+receives SBE responses, and subscribes to either the incremental order book or
+trade stream.
 
 Create a repository-root `config.yaml`:
 
@@ -22,4 +24,27 @@ Run the example:
 go run ./examples/market_data
 ```
 
-The example connects to the production endpoint `fix-md.binance.com:9000` and runs until interrupted.
+The example connects to the production endpoint `fix-md.binance.com:9001` and runs until interrupted.
+
+## Profiling
+
+While the example is running, inspect the average mutex contention delay during a 30-second window with:
+
+```bash
+go tool pprof -top -mean_delay \
+  'http://127.0.0.1:6060/debug/pprof/mutex?seconds=30'
+```
+
+Inspect live heap usage after forcing a GC cycle with:
+
+```bash
+go tool pprof -top -sample_index=inuse_space \
+  'http://127.0.0.1:6060/debug/pprof/heap?gc=1'
+```
+
+Inspect allocations made during a 30-second window with:
+
+```bash
+go tool pprof -top -sample_index=alloc_space \
+  'http://127.0.0.1:6060/debug/pprof/allocs?seconds=30'
+```

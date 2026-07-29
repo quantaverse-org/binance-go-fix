@@ -36,6 +36,7 @@ const (
 	TagExecType                                Tag = 150
 	TagLeavesQty                               Tag = 151
 	TagCashOrderQty                            Tag = 152
+	TagSecondaryOrderID                        Tag = 198
 	TagPegOffsetValue                          Tag = 211
 	TagMDReqID                                 Tag = 262
 	TagSubscriptionRequestType                 Tag = 263
@@ -52,6 +53,7 @@ const (
 	TagListStatusType                          Tag = 429
 	TagListOrderStatus                         Tag = 431
 	TagCxlRejResponseTo                        Tag = 434
+	TagOrderCapacity                           Tag = 528
 	TagMassCancelRequestType                   Tag = 530
 	TagMassCancelResponse                      Tag = 531
 	TagMassCancelRejectReason                  Tag = 532
@@ -98,6 +100,8 @@ const (
 	TagOrigClListID                            Tag = 25015
 	TagCumQuoteQty                             Tag = 25017
 	TagOrderCreationTime                       Tag = 25018
+	TagSecondarySymbol                         Tag = 25019
+	TagSecondaryExternalAccountID              Tag = 25020
 	TagWorkingFloor                            Tag = 25021
 	TagTrailingTime                            Tag = 25022
 	TagWorkingTime                             Tag = 25023
@@ -244,6 +248,13 @@ type MatchType string
 const (
 	MatchTypeOnePartyTradeReport MatchType = "1"
 	MatchTypeAutoMatch           MatchType = "4"
+)
+
+type OrderCapacity string
+
+const (
+	OrderCapacityAgency    OrderCapacity = "A"
+	OrderCapacityPrincipal OrderCapacity = "P"
 )
 
 type CancelRestrictions string
@@ -459,65 +470,70 @@ type MiscFee struct {
 }
 
 type ExecutionReport struct {
-	ExecID                   string
-	ClOrdID                  string
-	OrigClOrdID              string
-	OrderID                  int64
-	OrderQty                 float64
-	OrdType                  OrdType
-	Side                     Side
-	Symbol                   string
-	ExecInst                 ExecInst
-	Price                    float64
-	TimeInForce              TimeInForce
-	TransactTime             time.Time
-	OrderCreationTime        int64
-	MaxFloor                 float64
-	ListID                   string
-	CashOrderQty             float64
-	TargetStrategy           int64
-	StrategyID               int64
-	SelfTradePreventionMode  SelfTradePreventionMode
-	ExecType                 ExecType
-	CumQty                   float64
-	LeavesQty                float64
-	CumQuoteQty              float64
-	AggressorIndicator       *bool
-	TradeID                  string
-	LastPx                   float64
-	LastQty                  float64
-	OrdStatus                OrdStatus
-	AllocID                  int64
-	MatchType                MatchType
-	WorkingFloor             int64
-	TrailingTime             time.Time
-	WorkingIndicator         *bool
-	WorkingTime              time.Time
-	PreventedMatchID         int64
-	PreventedExecutionPrice  float64
-	PreventedExecutionQty    float64
-	TradeGroupID             int64
-	CounterSymbol            string
-	CounterOrderID           int64
-	PreventedQty             float64
-	LastPreventedQty         float64
-	SOR                      *bool
-	ErrorCode                int64
-	Text                     string
-	NoMiscFees               uint64
-	MiscFees                 []MiscFee
-	TriggerType              TriggerType
-	TriggerAction            TriggerAction
-	TriggerPrice             float64
-	TriggerPriceType         TriggerPriceType
-	TriggerPriceDirection    TriggerPriceDirection
-	TriggerTrailingDeltaBips int64
-	PegOffsetValue           float64
-	PegPriceType             PegPriceType
-	PegMoveType              PegMoveType
-	PegOffsetType            PegOffsetType
-	PeggedPrice              float64
-	ExpiryReason             string
+	ExecID                     string
+	ClOrdID                    string
+	OrigClOrdID                string
+	OrderID                    int64
+	OrderQty                   float64
+	OrdType                    OrdType
+	Side                       Side
+	Symbol                     string
+	ExecInst                   ExecInst
+	Price                      float64
+	TimeInForce                TimeInForce
+	TransactTime               time.Time
+	OrderCreationTime          int64
+	MaxFloor                   float64
+	ListID                     string
+	CashOrderQty               float64
+	TargetStrategy             int64
+	StrategyID                 int64
+	SelfTradePreventionMode    SelfTradePreventionMode
+	ExecType                   ExecType
+	CumQty                     float64
+	LeavesQty                  float64
+	CumQuoteQty                float64
+	AggressorIndicator         *bool
+	TradeID                    string
+	LastPx                     float64
+	LastQty                    float64
+	OrdStatus                  OrdStatus
+	SecondaryOrderID           int64
+	SecondaryExternalAccountID int64
+	SecondarySymbol            string
+	AllocID                    int64
+	MatchType                  MatchType
+	OrderCapacity              OrderCapacity
+	WorkingFloor               int64
+	TrailingTime               time.Time
+	WorkingIndicator           *bool
+	WorkingTime                time.Time
+	PreventedMatchID           int64
+	PreventedExecutionPrice    float64
+	PreventedExecutionQty      float64
+	TradeGroupID               int64
+	CounterSymbol              string
+	CounterOrderID             int64
+	PreventedQty               float64
+	LastPreventedQty           float64
+	SOR                        *bool
+	OrdRejReason               OrdRejReason
+	ErrorCode                  int64
+	Text                       string
+	NoMiscFees                 uint64
+	MiscFees                   []MiscFee
+	TriggerType                TriggerType
+	TriggerAction              TriggerAction
+	TriggerPrice               float64
+	TriggerPriceType           TriggerPriceType
+	TriggerPriceDirection      TriggerPriceDirection
+	TriggerTrailingDeltaBips   int64
+	PegOffsetValue             float64
+	PegPriceType               PegPriceType
+	PegMoveType                PegMoveType
+	PegOffsetType              PegOffsetType
+	PeggedPrice                float64
+	ExpiryReason               string
 }
 
 func NewExecutionReport() *ExecutionReport {
@@ -591,8 +607,12 @@ func (r *ExecutionReport) FromMessage(m *Message) error {
 	r.LastPx = p.optionalFloat(TagLastPx)
 	r.LastQty = lastQty
 	r.OrdStatus = OrdStatus(ordStatus)
+	r.SecondaryOrderID = p.optionalInt(TagSecondaryOrderID)
+	r.SecondaryExternalAccountID = p.optionalInt(TagSecondaryExternalAccountID)
+	r.SecondarySymbol = optionalString(m, TagSecondarySymbol)
 	r.AllocID = p.optionalInt(TagAllocID)
 	r.MatchType = MatchType(optionalString(m, TagMatchType))
+	r.OrderCapacity = OrderCapacity(optionalString(m, TagOrderCapacity))
 	r.WorkingFloor = p.optionalInt(TagWorkingFloor)
 	r.TrailingTime = p.optionalTimestamp(TagTrailingTime)
 	r.WorkingIndicator = p.optionalBoolPointer(TagWorkingIndicator)
@@ -606,6 +626,7 @@ func (r *ExecutionReport) FromMessage(m *Message) error {
 	r.PreventedQty = p.optionalFloat(TagPreventedQty)
 	r.LastPreventedQty = p.optionalFloat(TagLastPreventedQty)
 	r.SOR = p.optionalBoolPointer(TagSOR)
+	r.OrdRejReason = OrdRejReason(optionalString(m, TagOrdRejReason))
 	r.ErrorCode = p.optionalInt(TagErrorCode)
 	r.Text = optionalString(m, TagText)
 	r.NoMiscFees = noMiscFees
@@ -971,6 +992,9 @@ type ListStatusOrder struct {
 	Symbol                       string
 	OrderID                      int64
 	ClOrdID                      string
+	OrdRejReason                 OrdRejReason
+	ErrorCode                    int64
+	Text                         string
 	NoListTriggeringInstructions uint64
 	ListTriggeringInstructions   []ListTriggeringInstruction
 }
