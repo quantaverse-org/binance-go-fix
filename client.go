@@ -114,6 +114,8 @@ const (
 	EncodingModeFIX EncodingMode = iota
 	// EncodingModeFIXRequestSBEResponse uses text FIX requests and SBE responses on port 9001.
 	EncodingModeFIXRequestSBEResponse
+	// EncodingModeSBE uses SBE requests and responses on port 9002.
+	EncodingModeSBE
 )
 
 type ClientConfig struct {
@@ -219,7 +221,7 @@ func (c *MarketClient) MarketData(ctx context.Context, req *message.MarketDataRe
 	}
 
 	// SBE 行情响应不携带 MDReqID，必须在请求写入前登记 symbol/template 路由。
-	if c.config.EncodingMode == EncodingModeFIXRequestSBEResponse {
+	if encodingModeUsesSBEResponses(c.config.EncodingMode) {
 		if err := c.registerSBEMarketRoutes(req); err != nil {
 			return err
 		}
@@ -322,13 +324,15 @@ type Client struct {
 	config *ClientConfig
 
 	// connLk 串行化写入、重连和序列号递增，reader 只由消息处理协程使用。
-	connLk        sync.Mutex
-	conn          *tls.Conn
-	reader        *bufio.Reader
-	sbeMarshaller *fixsbe.SbeGoMarshaller
-	id            uint32
-	closed        chan struct{}
-	hbChannel     chan *message.TestRequest
+	connLk sync.Mutex
+	conn   *tls.Conn
+	reader *bufio.Reader
+	// SbeGoMarshaller 会复用内部缓冲；读响应和写请求必须使用不同实例。
+	sbeMarshaller        *fixsbe.SbeGoMarshaller
+	sbeRequestMarshaller *fixsbe.SbeGoMarshaller
+	id                   uint32
+	closed               chan struct{}
+	hbChannel            chan *message.TestRequest
 
 	// respChannels 用业务 ID 将应用层响应路由给正在等待的请求。
 	respChanLk   sync.Mutex
@@ -366,19 +370,20 @@ func newClient(host string, config *ClientConfig, subscription *subscriptionSend
 	}
 
 	return &Client{
-		host:            host,
-		config:          config,
-		conn:            conn,
-		reader:          bufio.NewReader(conn),
-		sbeMarshaller:   fixsbe.NewSbeGoMarshaller(),
-		closed:          make(chan struct{}),
-		hbChannel:       make(chan *message.TestRequest, 1),
-		respChannels:    make(map[string]*responseWaiter),
-		rejectChannels:  make(map[uint32]chan responseResult),
-		resubReqs:       make(map[string]message.Request),
-		sbeMarketRoutes: make(map[sbeMarketRoute]string),
-		sbeBookLevels:   make(map[string]map[sbeBookLevel]struct{}),
-		subscription:    subscription,
+		host:                 host,
+		config:               config,
+		conn:                 conn,
+		reader:               bufio.NewReader(conn),
+		sbeMarshaller:        fixsbe.NewSbeGoMarshaller(),
+		sbeRequestMarshaller: fixsbe.NewSbeGoMarshaller(),
+		closed:               make(chan struct{}),
+		hbChannel:            make(chan *message.TestRequest, 1),
+		respChannels:         make(map[string]*responseWaiter),
+		rejectChannels:       make(map[uint32]chan responseResult),
+		resubReqs:            make(map[string]message.Request),
+		sbeMarketRoutes:      make(map[sbeMarketRoute]string),
+		sbeBookLevels:        make(map[string]map[sbeBookLevel]struct{}),
+		subscription:         subscription,
 	}, nil
 }
 
@@ -388,9 +393,19 @@ func clientAddress(host string, mode EncodingMode) (string, error) {
 		return host + ":9000", nil
 	case EncodingModeFIXRequestSBEResponse:
 		return host + ":9001", nil
+	case EncodingModeSBE:
+		return host + ":9002", nil
 	default:
 		return "", fmt.Errorf("unsupported encoding mode: %d", mode)
 	}
+}
+
+func encodingModeUsesSBEResponses(mode EncodingMode) bool {
+	return mode == EncodingModeFIXRequestSBEResponse || mode == EncodingModeSBE
+}
+
+func encodingModeUsesSBERequests(mode EncodingMode) bool {
+	return mode == EncodingModeSBE
 }
 
 func (c *Client) Run(ctx context.Context) error {
@@ -445,7 +460,7 @@ func (c *Client) handlingMessage(ctx context.Context) {
 				g.Log().Warningf(ctx, "BinanceFixClient %s: read message error: %v", c.config.ClientName, err)
 				// SBE 的 SOFH 提供 frame 边界；读取或解码失败后无法保证 reader
 				// 仍对齐下一条 frame，因此重新建立会话并恢复行情订阅。
-				if c.config.EncodingMode == EncodingModeFIXRequestSBEResponse {
+				if encodingModeUsesSBEResponses(c.config.EncodingMode) {
 					if c.reconnecting(ctx) {
 						return
 					}
@@ -649,10 +664,6 @@ func decodeFIXInboundMessage(msg *message.Message) (*inboundMessage, error) {
 // dispatchInboundMessage routes an already decoded response to heartbeat,
 // synchronous request waiters, or the appropriate Subscription.
 func (c *Client) dispatchInboundMessage(ctx context.Context, inbound *inboundMessage) (bool, error) {
-	// TODO: use metrics instead of log
-	g.Log().Debugf(ctx, "BinanceFixClient %s: received message type %s, latency %v",
-		c.config.ClientName, inbound.msgType, time.Since(inbound.sendingTime))
-
 	switch resp := inbound.response.(type) {
 	case *message.Heartbeat:
 		g.Log().Debugf(ctx, "BinanceFixClient %s: received heartbeat", c.config.ClientName)
@@ -789,13 +800,9 @@ func (c *Client) logon() error {
 		req.WithSbeSchema(sbeSchemaID, sbeSchemaVersion)
 	}
 
-	// 每个新 FIX 会话的本地发送序列号从 1 开始，Logon 占用第一号。
+	// 每个新会话的本地发送序列号从 1 开始，Logon 占用第一号。
 	c.id = 1
-	msg, err := req.ToMessage(c.config.ClientName, targetCompId, c.id, time.Now())
-	if err != nil {
-		return err
-	}
-	if err = c.writeMessage(msg); err != nil {
+	if err := c.writeRequest(req, c.id, time.Now()); err != nil {
 		return err
 	}
 
@@ -884,16 +891,11 @@ func (c *Client) sendRequest(req message.Request, block bool, rejectCh chan resp
 
 	// 构造消息和注册 Reject 必须使用同一个尚未递增的序列号。
 	seqNum := c.id
-	msg, err := req.ToMessage(c.config.ClientName, targetCompId, seqNum, time.Now())
-	if err != nil {
-		return 0, err
-	}
-
 	// 必须先注册再写入，避免响应过快而找不到等待者。
 	if rejectCh != nil {
 		c.registerRejectChannel(seqNum, rejectCh)
 	}
-	if err = c.writeMessage(msg); err != nil {
+	if err := c.writeRequest(req, seqNum, time.Now()); err != nil {
 		if rejectCh != nil {
 			c.removeRejectChannel(seqNum)
 		}
@@ -1231,19 +1233,50 @@ func unexpectedResponseError(resp message.Response, want message.MsgType) error 
 	return fmt.Errorf("unexpected response type %T, want %s", resp, want)
 }
 
-// writeMessage 设置单次写超时并一次性写入完整 FIX 消息。
+// writeRequest 根据连接模式编码并写入一条完整请求。
+func (c *Client) writeRequest(req message.Request, seqNum uint32, sendingTime time.Time) error {
+	if encodingModeUsesSBERequests(c.config.EncodingMode) {
+		if c.sbeRequestMarshaller == nil {
+			c.sbeRequestMarshaller = fixsbe.NewSbeGoMarshaller()
+		}
+		frame, err := encodeSBERequest(
+			c.sbeRequestMarshaller,
+			req,
+			c.config.ClientName,
+			targetCompId,
+			seqNum,
+			sendingTime,
+		)
+		if err != nil {
+			return err
+		}
+		return c.writeBytes(frame)
+	}
+
+	msg, err := req.ToMessage(c.config.ClientName, targetCompId, seqNum, sendingTime)
+	if err != nil {
+		return err
+	}
+	return c.writeMessage(msg)
+}
+
+// writeMessage 设置单次写超时并一次性写入完整文本 FIX 消息。
 func (c *Client) writeMessage(msg *message.Message) error {
+	return c.writeBytes([]byte(msg.RawMessage()))
+}
+
+func (c *Client) writeBytes(data []byte) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(c.config.WriteTimeout)); err != nil {
 		return err
 	}
-	if _, err := c.conn.Write([]byte(msg.RawMessage())); err != nil {
+	if _, err := c.conn.Write(data); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (c *Client) readIncomingMessage() (*inboundMessage, error) {
-	if c.config.EncodingMode == EncodingModeFIXRequestSBEResponse {
+	if encodingModeUsesSBEResponses(c.config.EncodingMode) {
 		if err := c.conn.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval)); err != nil {
 			return nil, fmt.Errorf("failed to set read deadline: %w", err)
 		}

@@ -96,7 +96,7 @@ var mainCmd = gcmd.Command{
 
 		config := fix.NewClientConfig(apiKey, "EXAMPLE").
 			WithEnableNotify().
-			WithEncodingMode(fix.EncodingModeFIXRequestSBEResponse)
+			WithEncodingMode(fix.EncodingModeSBE)
 		client, subscription, err := fix.NewMarketClient(config)
 		if err != nil {
 			return fmt.Errorf("connect market data client: %w", err)
