@@ -435,7 +435,7 @@ func (c *Client) handlingMessage(ctx context.Context) {
 		// readIncomingMessage 根据连接模式读取文本 FIX 或一个完整 SBE frame。
 		inbound, err := c.readIncomingMessage()
 		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
+			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, io.EOF) {
 				g.Log().Warningf(ctx, "BinanceFixClient %s: read message timeout", c.config.ClientName)
 				readTimeout++
 				// 第一次超时发送 TestRequest；连续超时说明连接失效，需要重连。
